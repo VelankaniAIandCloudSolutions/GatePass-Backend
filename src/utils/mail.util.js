@@ -112,8 +112,12 @@ const sendManagerApprovalEmail = async (email, data) => {
                     A new material gate pass (<strong>${dcNumber}</strong>) has been submitted by <strong>${userName}</strong> and is awaiting your review.
                 </p>
 
+                <div style="background: #f8fafc; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; margin: 25px 0;">
+                    <p style="margin: 0; font-size: 15px; color: #1e293b; text-align: center;"><strong>Pass Type:</strong> ${data.passType === 'RGP' ? 'RGP (Returnable Gate Pass &ndash; Material Will Return)' : 'NRGP (Non-Returnable Gate Pass &ndash; Material Will Not Return)'}</p>
+                </div>
+
                 <div style="background: #f8fafc; border-radius: 12px; padding: 25px; margin: 30px 0; border: 1px solid #e2e8f0;">
-                    <p style="margin: 0 0 15px 0; font-size: 14px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; text-align: center;">Quick Actions</p>
+                    <p style="margin: 0 0 15px 0; font-size: 14px; font-weight: 60; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; text-align: center;">Quick Actions</p>
                     <div style="text-align: center; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
                         <a href="${approveUrl}" style="background-color: #10b981; color: #ffffff; padding: 12px 20px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px; display: inline-block; margin: 5px; transition: background 0.2s;">✅ Approve</a>
                         <a href="${rejectUrl}" style="background-color: #ef4444; color: #ffffff; padding: 12px 20px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px; display: inline-block; margin: 5px; transition: background 0.2s;">❌ Reject</a>
@@ -137,7 +141,7 @@ const sendManagerApprovalEmail = async (email, data) => {
         await transporter.sendMail({
             from: `"GatePass System" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: `Action Required: Gate Pass Approval (${dcNumber})`,
+            subject: `Action Required: Gate Pass Approval (${dcNumber} - ${data.passType})`,
             html: html
         });
         return true;
@@ -161,6 +165,7 @@ const sendOriginSecurityEmail = async (email, data) => {
             <p style="color: #475569;">A new material movement (<strong>${dcNumber}</strong>) has been approved and requires <strong>Dispatch</strong> from your location.</p>
             
             <div style="background: #f8fafc; padding: 25px; border-radius: 12px; margin: 25px 0; border: 1px solid #e2e8f0;">
+                <p style="margin: 5px 0;"><strong>Pass Type:</strong> ${data.passType === 'RGP' ? 'RGP (Returnable Gate Pass &ndash; Material Will Return)' : 'NRGP (Non-Returnable Gate Pass &ndash; Material Will Not Return)'}</p>
                 <p style="margin: 5px 0;"><strong>Origin:</strong> ${origin}</p>
                 <p style="margin: 5px 0;"><strong>Destination:</strong> ${destination}</p>
                 <p style="margin: 5px 0;"><strong>Submitted By:</strong> ${userName}</p>
@@ -182,7 +187,7 @@ const sendOriginSecurityEmail = async (email, data) => {
             
             <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
                 This is an automated notification from GatePass Security.
-            </p>
+            </p>0
         </div>
     `;
 
@@ -190,7 +195,7 @@ const sendOriginSecurityEmail = async (email, data) => {
         await transporter.sendMail({
             from: `"GatePass System" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: `Action Required: Dispatch Required - DC ${dcNumber}`,
+            subject: `Action Required: Dispatch Required - ${dcNumber} (${data.passType})`,
             html: html
         });
         return true;
@@ -211,6 +216,7 @@ const sendDestinationSecurityEmail = async (email, data) => {
             <p style="color: #475569;">A material movement (<strong>${dcNumber}</strong>) has been dispatched and is <strong>In Transit</strong> to your location.</p>
             
             <div style="background: #fffbeb; padding: 25px; border-radius: 12px; margin: 25px 0; border: 1px solid #fef3c7;">
+                <p style="margin: 5px 0;"><strong>Pass Type:</strong> ${data.passType === 'RGP' ? 'RGP (Returnable Gate Pass &ndash; Material Will Return)' : 'NRGP (Non-Returnable Gate Pass &ndash; Material Will Not Return)'}</p>
                 <p style="margin: 5px 0;"><strong>Origin:</strong> ${origin}</p>
                 <p style="margin: 5px 0;"><strong>Destination:</strong> ${destination}</p>
                 <p style="margin: 5px 0;"><strong>Submitted By:</strong> ${userName}</p>
@@ -240,11 +246,64 @@ const sendDestinationSecurityEmail = async (email, data) => {
         await transporter.sendMail({
             from: `"GatePass System" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: `Action Required: Receiving Confirmation - DC ${dcNumber}`,
+            subject: `Action Required: Receiving Confirmation - ${dcNumber} (${data.passType})`,
             html: html
         });
         return true;
     } catch (err) { console.error('Dest Sec Email Error:', err); return false; }
+};
+
+const sendReceiverConfirmationEmail = async (email, data) => {
+    const { receiverName, dcNumber, materialDetails, confirmationUrl } = data;
+    const loginUrl = process.env.FRONTEND_URL || 'http://localhost:8000';
+
+    const html = `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; background: #10b981; color: white; padding: 8px 16px; border-radius: 8px; font-weight: bold;">GatePass Logistics</div>
+            </div>
+            <h2 style="color: #1e293b; text-align: center; margin-bottom: 20px;">Receipt Confirmation Required</h2>
+            <p style="color: #475569;">Hello <strong>${receiverName}</strong>,</p>
+            <p style="color: #475569;">Materials associated with Gate Pass <strong>${dcNumber}</strong> have arrived at the destination. Please confirm receipt of the following items:</p>
+            
+            <div style="background: #f8fafc; padding: 15px 25px; border-radius: 12px; margin: 25px 0; border: 1px solid #e2e8f0; text-align: center;">
+                <p style="margin: 0; font-size: 15px; color: #1e293b;"><strong>Pass Type:</strong> ${data.passType === 'RGP' ? 'RGP (Returnable Gate Pass &ndash; Material Will Return)' : 'NRGP (Non-Returnable Gate Pass &ndash; Material Will Not Return)'}</p>
+            </div>
+
+            <div style="background: #f0fdf4; padding: 25px; border-radius: 12px; margin: 25px 0; border: 1px solid #dcfce7;">
+                <p style="margin: 0 0 10px 0; font-weight: bold; color: #166534;">Items Received:</p>
+                <div style="font-size: 14px; color: #166534; line-height: 1.6;">
+                    ${materialDetails}
+                </div>
+            </div>
+
+            <div style="background: #f8fafc; border: 1px dashed #cbd5e1; padding: 20px; border-radius: 12px; margin-bottom: 25px; text-align: center;">
+                <p style="margin: 0 0 15px 0; font-weight: 600; color: #475569; font-size: 14px; text-transform: uppercase;">Quick Actions</p>
+                <div style="text-align: center;">
+                    <a href="${confirmationUrl}" style="background-color: #10b981; color: white; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">✅ Confirm Receipt</a>
+                    ${data.pdfUrl ? `<a href="${data.pdfUrl}" target="_blank" style="background-color: #3b82f6; color: white; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">📄 View PDF</a>` : ''}
+                </div>
+            </div>
+
+            <div style="text-align: center; margin: 20px 0;">
+                <a href="${loginUrl}" style="color: #10b981; text-decoration: none; font-weight: 600; font-size: 14px; border-bottom: 1px solid #10b981;">🔐 Login to Portal for Full Details</a>
+            </div>
+            
+            <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                This is an automated notification from GatePass Security.
+            </p>
+        </div>
+    `;
+
+    try {
+        await transporter.sendMail({
+            from: `"GatePass System" <${process.env.EMAIL_USER}>`,
+            to: email,
+            subject: `Action Required: Confirm Receipt of Materials - ${dcNumber} (${data.passType})`,
+            html: html
+        });
+        return true;
+    } catch (err) { console.error('Receiver Confirmation Email Error:', err); return false; }
 };
 
 module.exports = { 
@@ -252,5 +311,6 @@ module.exports = {
     sendNotificationEmail, 
     sendManagerApprovalEmail,
     sendOriginSecurityEmail,
-    sendDestinationSecurityEmail
+    sendDestinationSecurityEmail,
+    sendReceiverConfirmationEmail
 };

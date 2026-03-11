@@ -38,6 +38,7 @@ router.delete('/avatar', protect, userController.removeAvatar);
 router.get('/available-managers', protect, userController.getAvailableManagers);
 router.put('/managers', protect, userController.updateManagers);
 router.put('/security-email', protect, userController.updateSecurityEmail);
+router.get('/search', protect, userController.searchUsers);
 
 // Admin Routes
 router.get('/admin/users', protect, userController.getAllUsers);

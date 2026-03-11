@@ -19,6 +19,11 @@ router.get('/manager/pdf', materialController.pdfLimiter, materialController.get
 router.get('/security/approve', materialController.approveSecurityByToken);
 router.get('/security/reject', materialController.rejectSecurityByToken);
 
+// 2.2 Receiver Actions
+router.get('/confirm-receiver', materialController.confirmReceiverByToken);
+router.post('/confirm-receiver-portal', protect, materialController.confirmReceiverPortal);
+router.post('/reject-receiver-portal', protect, materialController.rejectReceiverPortal);
+
 // 3. Security Dashboard Actions
 router.post('/security/dispatch', protect, authorize('security'), requireLocation('dispatch'), materialController.markDispatched);
 router.post('/security/receive', protect, authorize('security'), requireLocation('receiving'), materialController.markReceived);

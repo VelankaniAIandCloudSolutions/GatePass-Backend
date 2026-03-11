@@ -89,6 +89,8 @@ const generateChallanPDF = async (passData, isDraft = false) => {
         originSigBase64 = loadSignature(passData.security_origin_signature_path);
         destSigBase64 = loadSignature(passData.security_destination_signature_path);
         const adminSigBase64 = loadSignature(passData.admin_signature_path);
+        const requesterSigBase64 = loadSignature(passData.created_by_signature_path);
+        const receiverSigBase64 = loadSignature(passData.receiver_signature_path);
 
         // Format helper: DD-MM-YYYY hh:mm AM/PM (IST)
         const formatIST = (dateStr) => {
@@ -398,6 +400,10 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                     <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">Gross Weight (KG) :</div>
                     <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.gross_weight) || '-'}</div>
                 </div>
+                <div style="border-top: 1px solid #000; display: flex;">
+                    <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">Vehicle Number :</div>
+                    <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.vehicle_number) || '-'}</div>
+                </div>
 
                 <!-- Items Table -->
                 <table class="items-table" style="border-top: 1px solid #000;">
@@ -436,9 +442,6 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                     </tfoot>
                 </table>
 
-                <div class="footer-strip" style="display: none;">
-                    AMOUNT IN WORDS : <span style="font-size: 13px; color: #1e293b; margin-left: 10px; border-bottom: 1px dashed #64748b;">${totalWords}</span>
-                </div>
 
                 <div class="terms">
                     <div class="center b" style="text-decoration: underline; margin-bottom: 10px;">TO WHOM SO EVER IT MAY CONCERN</div>
@@ -460,6 +463,7 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                         <div style="width: 48%;">
                             <div class="b" style="text-transform: uppercase; font-size: 11px;">REQUESTED BY: ${sanitizeHTML(passData.created_by_name)}</div>
                             ${passData.created_user_mobile ? `<div style="font-size: 10px; color: #000; margin-top: 2px;"><span class="b">Contact:</span> ${passData.created_user_mobile}</div>` : ''}
+                            ${requesterSigBase64 ? `<img src="data:image/png;base64,${requesterSigBase64}" style="width: 55px; height: auto; margin-top: 4px; mix-blend-mode: multiply;" />` : ''}
                         </div>
 
                         <!-- Sent To Section (Only if name exists) -->
@@ -467,6 +471,7 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                         <div style="width: 48%; text-align: right;">
                             <div class="b" style="text-transform: uppercase; font-size: 11px;">SENT TO: ${sanitizeHTML(passData.receiver_name)}</div>
                             ${passData.receiver_mobile ? `<div style="font-size: 10px; color: #000; margin-top: 2px;"><span class="b">Contact:</span> ${passData.receiver_mobile}</div>` : ''}
+                            ${(passData.status === 'COMPLETED' && receiverSigBase64) ? `<img src="data:image/png;base64,${receiverSigBase64}" style="width: 55px; height: auto; margin-top: 4px; mix-blend-mode: multiply;" />` : ''}
                         </div>
                         ` : ''}
                     </div>

@@ -259,6 +259,25 @@ const adminUpdateUserMobile = async (req, res) => {
     }
 };
 
+const searchUsers = async (req, res) => {
+    const { query } = req.query;
+    if (!query || query.trim().length < 2) {
+        return sendResponse(res, 400, false, 'Search query must be at least 2 characters');
+    }
+
+    try {
+        const searchTerm = `%${query.trim()}%`;
+        const [users] = await pool.query(
+            'SELECT id, name, email, mobile_number FROM users WHERE (name LIKE ? OR email LIKE ?) AND status = "active" LIMIT 10',
+            [searchTerm, searchTerm]
+        );
+        return sendResponse(res, 200, true, 'Users fetched', users);
+    } catch (err) {
+        console.error('Search users error:', err);
+        return sendResponse(res, 500, false, 'Failed to search users');
+    }
+};
+
 module.exports = {
     uploadSignature,
     getProfile,
@@ -269,5 +288,6 @@ module.exports = {
     updateManagers,
     updateSecurityEmail,
     getAllUsers,
-    adminUpdateUserMobile
+    adminUpdateUserMobile,
+    searchUsers
 };

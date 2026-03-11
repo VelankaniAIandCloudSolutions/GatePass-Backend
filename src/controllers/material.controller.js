@@ -54,7 +54,9 @@ const fetchFullPassData = async (passId) => {
             mu.name as manager_name,
             mu.signature_path as manager_signature_path,
             mu.mobile_number as manager_mobile,
-            mu.address as manager_address
+            mu.address as manager_address,
+            rec.signature_path as receiver_signature_path,
+            u.signature_path as created_by_signature_path
         FROM material_gate_passes p
         LEFT JOIN users u ON p.created_by = u.id
         LEFT JOIN locations fl ON p.from_location_id = fl.id
@@ -63,6 +65,7 @@ const fetchFullPassData = async (passId) => {
         LEFT JOIN users ru ON p.received_by = ru.id
         LEFT JOIN users mu ON p.approved_by_manager_id = mu.id
         LEFT JOIN users au ON p.approved_by_admin_id = au.id
+        LEFT JOIN users rec ON p.receiver_id = rec.id
         WHERE p.id = ?
     `, [passId]);
 
@@ -80,7 +83,8 @@ const previewMaterialPass = async (req, res) => {
     const { 
         items, movement_type, pass_type, from_location_id, to_location_id, external_address,
         customer_reference, no_of_boxes, net_weight, gross_weight,
-        receiver_name, receiver_mobile
+        receiver_id, receiver_name, receiver_mobile, receiver_email,
+        expected_return_date
     } = req.body;
 
     try {
@@ -122,8 +126,8 @@ const previewMaterialPass = async (req, res) => {
             receiver_name,
             receiver_mobile,
             pass_type: pass_type || 'RGP',
-            created_by_name: req.user.name,
-            items: items.map(i => ({ ...i, unit_cost: 0, total: 0 }))
+            items: items.map(i => ({ ...i, unit_cost: 0, total: 0 })),
+            created_by_signature_path: req.user.signature_path || null
         };
 
         const pdfBuffer = await generateChallanPDF(passData, true); // true = Draft Watermark
@@ -145,7 +149,8 @@ const createMaterialPass = async (req, res) => {
     const { 
         items, movement_type, pass_type, from_location_id, to_location_id, external_address,
         customer_reference, no_of_boxes, net_weight, gross_weight,
-        receiver_name, receiver_mobile
+        receiver_id, receiver_name, receiver_mobile, receiver_email,
+        expected_return_date
     } = req.body;
     const created_by = req.user.id;
 
@@ -189,17 +194,18 @@ const createMaterialPass = async (req, res) => {
 
         const [result] = await connection.query(
             `INSERT INTO material_gate_passes 
-            (dc_number, created_by, movement_type, pass_type, from_location_id, to_location_id, external_address, 
-            receiver_name, receiver_mobile,
-            customer_reference, no_of_boxes, net_weight, gross_weight, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_MANAGER')`,
+            (dc_number, created_by, movement_type, pass_type, from_location_id, to_location_id, external_address, receiver_id, receiver_name, receiver_mobile, receiver_email, customer_reference, no_of_boxes, net_weight, gross_weight, status, expected_return_date) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_MANAGER', ?)`,
             [
                 dc_number, created_by, movement_type, pass_type || 'RGP', from_location_id, 
                 movement_type === 'internal' ? to_location_id : null, 
                 movement_type === 'external' ? external_address : null,
-                receiver_name?.trim() || null,
+                receiver_id || null, 
+                receiver_name?.trim() || null, 
                 receiver_mobile?.trim() || null,
-                customer_reference || null, no_of_boxes || 0, net_weight || null, gross_weight || null
+                receiver_email?.trim() || null,
+                customer_reference || null, no_of_boxes || 0, net_weight || null, gross_weight || null,
+                pass_type === 'RGP' ? (expected_return_date || null) : null
             ]
         );
 
@@ -253,6 +259,7 @@ const createMaterialPass = async (req, res) => {
                             await sendManagerApprovalEmail(manager.email, {
                                 managerName: manager.name,
                                 dcNumber: dc_number,
+                                passType: req.body.pass_type || 'NRGP',
                                 userName: req.user.name,
                                 approveUrl: `${baseUrl}/api/material/manager/approve?token=${actionToken}&managerId=${manager.id}`,
                                 rejectUrl: `${baseUrl}/api/material/manager/reject?token=${actionToken}&managerId=${manager.id}`,
@@ -334,6 +341,11 @@ const updateManagerStatus = async (req, res) => {
 
         const [pass] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [id]);
         if (!pass.length) throw new Error('Pass not found');
+
+        // Audit Lock: Block if already COMPLETED
+        if (pass[0].status === 'COMPLETED') {
+            throw new Error('Action Blocked: This pass is marked as COMPLETED and cannot be modified.');
+        }
         
         const currentStatus = (pass[0].status || '').toUpperCase();
         if (currentStatus !== 'PENDING_MANAGER') {
@@ -399,6 +411,7 @@ const updateManagerStatus = async (req, res) => {
                             await sendOriginSecurityEmail(security[0].email, {
                                 securityName: security[0].name,
                                 dcNumber: fullPass.dc_number,
+                                passType: fullPass.pass_type,
                                 origin: fullPass.from_location_name,
                                 destination: fullPass.to_location_name || fullPass.external_address,
                                 userName: fullPass.created_by_name,
@@ -514,8 +527,8 @@ const getPendingPasses = async (req, res) => {
         let params = [];
 
         if (role === 'user') {
-            query += ' WHERE p.created_by = ?';
-            params = [id];
+            query += ' WHERE (p.created_by = ? OR (p.receiver_id = ? AND p.status = "PENDING_RECEIVER_CONFIRMATION"))';
+            params = [id, id];
         } else if (role === 'manager') {
             query += ' JOIN user_managers um ON p.created_by = um.user_id WHERE p.status = "PENDING_MANAGER" AND um.manager_id = ?';
             params = [id];
@@ -591,14 +604,21 @@ const rejectSecurityByToken = async (req, res) => {
 };
 
 const handleSecurityTokenAction = async (req, res, token, passId, action) => {
-    const renderHtmlResponse = (success, title, msg) => {
+    // Basic audit lock check for token actions
+    const [pCheck] = await pool.query('SELECT status FROM material_gate_passes WHERE id = ?', [passId]);
+    if (pCheck.length > 0 && pCheck[0].status === 'COMPLETED') {
+        return res.status(403).send('<h1>Action Blocked</h1><p>This pass is mark as COMPLETED and cannot be modified.</p>');
+    }
+
+    const renderHtmlResponse = (success, title, msg, extraHtml = '') => {
         return res.send(`
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 100px auto; text-align: center; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border: 1px solid ${success ? '#e2e8f0' : '#fee2e2'};">
                 <div style="font-size: 48px; margin-bottom: 20px;">${success ? '✅' : '❌'}</div>
                 <h1 style="color: ${success ? '#1e293b' : '#991b1b'}; margin-bottom: 10px;">${title}</h1>
                 <p style="color: #64748b; font-size: 16px; line-height: 1.6;">${msg}</p>
+                ${extraHtml}
                 <div style="margin-top: 30px;">
-                    <a href="http://localhost:8000" style="display: inline-block; background: #6366f1; color: white; padding: 12px 24px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 14px;">Back to Portal</a>
+                    <a href="${process.env.FRONTEND_URL || 'http://localhost:8000'}" style="display: inline-block; background: #6366f1; color: white; padding: 12px 24px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 14px;">Back to Portal</a>
                 </div>
             </div>
         `);
@@ -631,16 +651,28 @@ const handleSecurityTokenAction = async (req, res, token, passId, action) => {
 
         // Approve logic
         if (currentStatus === 'PENDING_SECURITY_ORIGIN') {
-            // Dispatch
+            const vehicleNumber = req.query.vehicle_number;
+            if (!vehicleNumber) {
+                // Show form to capture vehicle number
+                const vehicleForm = `
+                    <div style="margin-top: 25px; padding-top: 25px; border-top: 1px solid #e2e8f0;">
+                        <form action="/api/material/security/approve" method="GET">
+                            <input type="hidden" name="token" value="${token}" />
+                            <input type="hidden" name="passId" value="${passId}" />
+                            <label style="display: block; font-size: 14px; font-weight: 600; color: #1e293b; margin-bottom: 8px; text-align: left;">Vehicle Number (Required):</label>
+                            <input type="text" name="vehicle_number" placeholder="e.g. KA01AB1234" required style="width: 100%; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; margin-bottom: 20px; box-sizing: border-box;" />
+                            <button type="submit" style="width: 100%; background: #10b981; color: white; padding: 12px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer;">✅ Confirm Dispatch</button>
+                        </form>
+                    </div>
+                `;
+                return renderHtmlResponse(true, 'Dispatch Approval', `Please enter the vehicle number to complete the dispatch for ${pass[0].dc_number}.`, vehicleForm);
+            }
+
+            // Proceed with dispatch
             const [security] = await pool.query("SELECT * FROM users WHERE role = 'security' AND location_id = ? AND status = 'active' LIMIT 1", [pass[0].from_location_id]);
             if (!security.length) throw new Error('No active security user found for dispatch.');
-            req.user = security[0];
-            req.body = { passId, vehicle_number: 'EMAIL_AUTH' };
             
-            // We need to return the response from markDispatched but it sends JSON. 
-            // So we'll call it and then handle the response manually or redirect.
-            // Better to refactor the logic.
-            const result = await markDispatchedInternal(passId, 'EMAIL_AUTH', security[0]);
+            await markDispatchedInternal(passId, vehicleNumber, security[0]);
             return renderHtmlResponse(true, 'Dispatched', 'Material has been successfully marked as DISPATCHED.');
         } else if (currentStatus === 'PENDING_SECURITY_DESTINATION') {
             // Receive
@@ -668,6 +700,8 @@ const markDispatchedInternal = async (passId, vehicle_number, securityUser) => {
         const [pass] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [passId]);
         if (!pass.length) throw new Error('Pass not found');
         
+        if (pass[0].status === 'COMPLETED') throw new Error('Action Blocked: Pass already COMPLETED');
+
         const currentStatus = pass[0].status;
         if (currentStatus !== 'PENDING_SECURITY_ORIGIN') throw new Error('Pass is not in dispatch stage');
 
@@ -708,6 +742,7 @@ const markDispatchedInternal = async (passId, vehicle_number, securityUser) => {
                             await sendDestinationSecurityEmail(destSecurity[0].email, {
                                 securityName: destSecurity[0].name,
                                 dcNumber: fullPass.dc_number,
+                                passType: fullPass.pass_type,
                                 origin: fullPass.from_location_name,
                                 destination: fullPass.to_location_name,
                                 userName: fullPass.created_by_name,
@@ -741,6 +776,8 @@ const markReceivedInternal = async (passId, securityUser) => {
         const [pass] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [passId]);
         if (!pass.length) throw new Error('Pass not found');
 
+        if (pass[0].status === 'COMPLETED') throw new Error('Action Blocked: Pass already COMPLETED');
+
         const currentStatus = pass[0].status;
         if (currentStatus !== 'PENDING_SECURITY_DESTINATION') throw new Error('Pass is not in receiving stage');
 
@@ -749,22 +786,108 @@ const markReceivedInternal = async (passId, securityUser) => {
             throw new Error('Unauthorized: You are not at the destination location');
         }
 
-        const nextStatus = 'COMPLETED';
+        const isNRGP = pass[0].pass_type === 'NRGP';
+        const nextStatus = isNRGP ? 'PENDING_RECEIVER_CONFIRMATION' : 'COMPLETED';
+        const receiverToken = isNRGP ? require('crypto').randomBytes(32).toString('hex') : null;
+
         const [result] = await connection.query(
-            `UPDATE material_gate_passes SET status = ?, received_by = ?, security_destination_approved_at = NOW(), security_action_token = NULL 
+            `UPDATE material_gate_passes SET status = ?, received_by = ?, security_destination_approved_at = NOW(), security_action_token = ?, receiver_action_token = ?
              WHERE id = ? AND status = 'PENDING_SECURITY_DESTINATION'`, 
-            [nextStatus, securityUser.id, passId]
+            [nextStatus, securityUser.id, null, receiverToken, passId]
         );
 
         if (result.affectedRows === 0) throw new Error('Update failed (Security Race Condition)');
 
-        await logTracking(connection, passId, 'DESTINATION_SECURITY', 'COMPLETED', currentStatus, nextStatus, securityUser.id, securityUser.location_id, 'security');
+        await logTracking(connection, passId, 'DESTINATION_SECURITY', isNRGP ? 'RECEIVED_AT_DESTINATION' : 'COMPLETED', currentStatus, nextStatus, securityUser.id, securityUser.location_id, 'security');
+        
         await connection.commit();
+
+        // Notify Receiver if NRGP
+        if (isNRGP && pass[0].receiver_email) {
+            const triggerReceiverNotify = async () => {
+                try {
+                    const { sendReceiverConfirmationEmail } = require('../utils/mail.util');
+                    const fullPass = await fetchFullPassData(passId);
+                    const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
+                    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8000';
+                    
+                    const materialDetails = fullPass.items.map(item => 
+                        `• ${item.description} (Qty: ${item.qty})`
+                    ).join('<br/>');
+
+                    await sendReceiverConfirmationEmail(pass[0].receiver_email, {
+                        receiverName: fullPass.receiver_name,
+                        dcNumber: fullPass.dc_number,
+                        passType: fullPass.pass_type,
+                        materialDetails: materialDetails,
+                        confirmationUrl: `${baseUrl}/api/material/confirm-receiver?token=${receiverToken}&passId=${passId}`,
+                        pdfUrl: `${baseUrl}/api/material/manager/pdf?token=${fullPass.pdf_access_token}`
+                    });
+                } catch (err) {
+                    console.error('Receiver Notify Async Error:', err);
+                }
+            };
+            setTimeout(triggerReceiverNotify, 500);
+        }
+
         return true;
     } catch (err) {
         await connection.rollback();
         throw err;
     } finally { connection.release(); }
+};
+
+// 7.1 Confirm Receiver (NRGP ONLY)
+const confirmReceiverByToken = async (req, res) => {
+    const { token, passId } = req.query;
+    
+    const renderHtmlResponse = (success, title, msg) => {
+        return res.send(`
+            <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 100px auto; text-align: center; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border: 1px solid ${success ? '#e2e8f0' : '#fee2e2'};">
+                <div style="font-size: 48px; margin-bottom: 20px;">${success ? '✅' : '❌'}</div>
+                <h1 style="color: ${success ? '#1e293b' : '#991b1b'}; margin-bottom: 10px;">${title}</h1>
+                <p style="color: #64748b; font-size: 16px; line-height: 1.6;">${msg}</p>
+                <div style="margin-top: 30px;">
+                    <a href="${process.env.FRONTEND_URL || 'http://localhost:8000'}" style="display: inline-block; background: #10b981; color: white; padding: 12px 24px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 14px;">Back to Portal</a>
+                </div>
+            </div>
+        `);
+    };
+
+    if (!token || !passId) return renderHtmlResponse(false, 'Error', 'Missing confirmation token or pass ID.');
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [pass] = await connection.query(
+            'SELECT * FROM material_gate_passes WHERE id = ? AND receiver_action_token = ? FOR UPDATE', 
+            [passId, token]
+        );
+
+        if (!pass.length) return renderHtmlResponse(false, 'Link Invalid', 'This link is invalid or has already been used.');
+        
+        if (pass[0].status !== 'PENDING_RECEIVER_CONFIRMATION') {
+            return renderHtmlResponse(false, 'Action Invalid', `This pass is currently in ${pass[0].status.replace(/_/g, ' ')} stage.`);
+        }
+
+        const nextStatus = 'COMPLETED';
+        await connection.query(
+            `UPDATE material_gate_passes SET status = ?, receiver_confirmed_at = NOW(), receiver_confirmed_by = ?, receiver_action_token = NULL \r\n             WHERE id = ?`,
+            [nextStatus, pass[0].receiver_id || 0, passId]
+        );
+
+        await logTracking(connection, passId, 'RECEIVER_CONFIRMATION', 'COMPLETED', 'PENDING_RECEIVER_CONFIRMATION', nextStatus, pass[0].receiver_id || 0, pass[0].to_location_id, 'receiver');
+
+        await connection.commit();
+        return renderHtmlResponse(true, 'Confirmed', 'Thank you! You have successfully confirmed receipt of the materials.');
+    } catch (err) {
+        await connection.rollback();
+        console.error('Receiver confirmation error:', err);
+        return renderHtmlResponse(false, 'Confirmation Failed', err.message || 'Operation failed.');
+    } finally {
+        connection.release();
+    }
 };
 
 const rejectSecurityInternal = async (passId, reason, securityUser) => {
@@ -773,6 +896,8 @@ const rejectSecurityInternal = async (passId, reason, securityUser) => {
         await connection.beginTransaction();
         const [pass] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [passId]);
         if (!pass.length) throw new Error('Pass not found');
+
+        if (pass[0].status === 'COMPLETED') throw new Error('Action Blocked: Pass already COMPLETED');
 
         const currentStatus = pass[0].status;
         let stage = '';
@@ -841,15 +966,15 @@ const getPassesByStatus = async (req, res) => {
 
     try {
         let statusFilter = '';
-        if (statusParam === 'active') statusFilter = "p.status NOT IN ('COMPLETED', 'REJECTED')"; 
-        else if (statusParam === 'pending') statusFilter = "p.status IN ('PENDING_MANAGER', 'PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION')";
+        if (statusParam === 'active') statusFilter = "p.status NOT IN ('COMPLETED', 'REJECTED', 'REJECTED_BY_RECEIVER')"; 
+        else if (statusParam === 'pending') statusFilter = "p.status IN ('PENDING_MANAGER', 'PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION', 'PENDING_RECEIVER_CONFIRMATION')";
         else if (statusParam === 'approved') statusFilter = "p.status = 'COMPLETED'";
-        else if (statusParam === 'rejected') statusFilter = "p.status = 'REJECTED'";
+        else if (statusParam === 'rejected') statusFilter = "p.status IN ('REJECTED', 'REJECTED_BY_RECEIVER')";
 
         let query = `
             SELECT 
                 p.id, p.dc_number, p.status, p.created_at, p.dispatched_at, p.received_at, p.to_location_id,
-                p.from_location_id, p.external_address,
+                p.from_location_id, p.external_address, p.receiver_id,
                 u.name as created_by_name,
                 fl.location_name as from_name,
                 tl.location_name as to_name
@@ -863,8 +988,8 @@ const getPassesByStatus = async (req, res) => {
         let whereClauses = [statusFilter];
 
         if (role === 'user') {
-            whereClauses.push('p.created_by = ?');
-            params.push(userId);
+            whereClauses.push('(p.created_by = ? OR p.receiver_id = ?)');
+            params.push(userId, userId);
         } else if (role === 'manager') {
             query = query.replace('SELECT', 'SELECT um.manager_id, ');
             query += ' JOIN user_managers um ON p.created_by = um.user_id ';
@@ -894,10 +1019,14 @@ const getPassesByStatus = async (req, res) => {
                 case 'PENDING_SECURITY_DESTINATION':
                     currentStage = 'Waiting at Destination Security';
                     break;
+                case 'PENDING_RECEIVER_CONFIRMATION':
+                    currentStage = 'Waiting for Receiver Confirmation';
+                    break;
                 case 'COMPLETED':
                     currentStage = 'Material Received & Completed';
                     break;
                 case 'REJECTED':
+                case 'REJECTED_BY_RECEIVER':
                     currentStage = 'Rejected';
                     break;
                 default:
@@ -915,6 +1044,7 @@ const getPassesByStatus = async (req, res) => {
                 status: rawStatus,
                 current_stage: currentStage,
                 created_by: p.created_by_name,
+                receiver_id: p.receiver_id,
                 created_at: p.created_at
             };
         });
@@ -932,7 +1062,7 @@ const getCompletedPasses = async (req, res) => {
     const { role, id: userId, location_id: siteId } = req.user;
     try {
         let baseQuery = `
-            SELECT p.id, p.dc_number, p.created_at,
+            SELECT p.id, p.dc_number, p.created_at, p.receiver_id,
                 fl.location_name AS origin_name,
                 tl.location_name AS destination_name,
                 u.name AS submitted_by,
@@ -949,8 +1079,8 @@ const getCompletedPasses = async (req, res) => {
         
         // Role‑based restrictions
         if (role === 'user') {
-            whereClauses.push('p.created_by = ?');
-            params.push(userId);
+            whereClauses.push('(p.created_by = ? OR p.receiver_id = ?)');
+            params.push(userId, userId);
         } else if (role === 'manager') {
             // Use EXISTS to filter by manager's team safely without messing up JOIN order
             whereClauses.push(`EXISTS (
@@ -983,6 +1113,7 @@ const getCompletedPasses = async (req, res) => {
             id: p.id,
             dc_number: p.dc_number,
             manager_id: p.manager_id,
+            receiver_id: p.receiver_id,
             origin: p.origin_name,
             destination: p.destination_name,
             submitted_by: p.submitted_by,
@@ -1009,11 +1140,13 @@ const getPassTracking = async (req, res) => {
             SELECT p.*, 
                    fl.location_name as from_name, 
                    tl.location_name as to_name,
-                   u.name as creator_name
+                   u.name as creator_name,
+                   ur.name as receiver_name
             FROM material_gate_passes p
             LEFT JOIN locations fl ON p.from_location_id = fl.id
             LEFT JOIN locations tl ON p.to_location_id = tl.id
             LEFT JOIN users u ON p.created_by = u.id
+            LEFT JOIN users ur ON p.receiver_id = ur.id
             WHERE LOWER(p.dc_number) = LOWER(?)
         `, [dc.trim()]);
 
@@ -1026,7 +1159,7 @@ const getPassTracking = async (req, res) => {
         let hasAccess = false;
         if (role === 'admin') {
             hasAccess = true;
-        } else if (role === 'user' && pass.created_by === userId) {
+        } else if (role === 'user' && (pass.created_by === userId || pass.receiver_id === userId)) {
             hasAccess = true;
         } else if (role === 'manager') {
             // Manager can see if they are the linked manager of the creator
@@ -1054,14 +1187,19 @@ const getPassTracking = async (req, res) => {
             origin: pass.from_name,
             destination: pass.to_name || pass.external_address,
             current_status: (pass.status || '').toUpperCase(),
+            pass_type: pass.pass_type,
+            receiver_name: pass.receiver_name,
+            receiver_confirmed_at: pass.receiver_confirmed_at,
             current_stage: (() => {
                 const s = (pass.status || '').toUpperCase();
                 const statusMap = {
                     'PENDING_MANAGER': 'Waiting for Manager Approval',
                     'PENDING_SECURITY_ORIGIN': 'Waiting at Dispatch Location',
                     'PENDING_SECURITY_DESTINATION': 'Waiting at Receiving Location',
+                    'PENDING_RECEIVER_CONFIRMATION': 'Waiting for Receiver Confirmation',
                     'COMPLETED': 'Movement Completed',
-                    'REJECTED': 'Rejected'
+                    'REJECTED': 'Rejected',
+                    'REJECTED_BY_RECEIVER': 'Rejected by Receiver'
                 };
                 return statusMap[s] || 'Processing';
             })(),
@@ -1088,17 +1226,17 @@ const getDashboardStats = async (req, res) => {
     try {
         let query = `
             SELECT 
-                SUM(CASE WHEN status NOT IN ('COMPLETED', 'REJECTED') THEN 1 ELSE 0 END) as active,
-                SUM(CASE WHEN status IN ('PENDING_MANAGER', 'PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION') THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status NOT IN ('COMPLETED', 'REJECTED', 'REJECTED_BY_RECEIVER') THEN 1 ELSE 0 END) as active,
+                SUM(CASE WHEN status IN ('PENDING_MANAGER', 'PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION', 'PENDING_RECEIVER_CONFIRMATION') THEN 1 ELSE 0 END) as pending,
                 SUM(CASE WHEN status IN ('PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION') THEN 1 ELSE 0 END) as approved,
-                SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) as rejected
+                SUM(CASE WHEN status IN ('REJECTED', 'REJECTED_BY_RECEIVER') THEN 1 ELSE 0 END) as rejected
             FROM material_gate_passes p
         `;
 
         let params = [];
         if (role === 'user') {
-            query += ' WHERE p.created_by = ?';
-            params.push(userId);
+            query += ' WHERE (p.created_by = ? OR p.receiver_id = ?)';
+            params.push(userId, userId);
         } else if (role === 'manager') {
             query += ' JOIN user_managers um ON p.created_by = um.user_id WHERE um.manager_id = ?';
             params.push(userId);
@@ -1122,6 +1260,98 @@ const getDashboardStats = async (req, res) => {
     }
 };
 
+// 7.2 Confirm Receiver from Portal (Authenticated)
+const confirmReceiverPortal = async (req, res) => {
+    const { passId } = req.body;
+    const receiverUserId = req.user.id;
+
+    if (!passId) return sendResponse(res, 400, false, 'Missing pass ID');
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [pass] = await connection.query(
+            'SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', 
+            [passId]
+        );
+
+        if (!pass.length) throw new Error('Pass not found');
+        
+        if (pass[0].status === 'COMPLETED') throw new Error('Action Blocked: Pass already COMPLETED');
+
+        if (parseInt(pass[0].receiver_id) !== parseInt(receiverUserId)) {
+            throw new Error('Unauthorized: You are not the assigned receiver');
+        }
+
+        if (pass[0].status !== 'PENDING_RECEIVER_CONFIRMATION') {
+             throw new Error(`Pass is in ${pass[0].status} stage`);
+        }
+
+        const nextStatus = 'COMPLETED';
+        await connection.query(
+            `UPDATE material_gate_passes SET status = ?, receiver_confirmed_at = NOW(), receiver_confirmed_by = ?, receiver_action_token = NULL 
+             WHERE id = ?`,
+            [nextStatus, receiverUserId, passId]
+        );
+
+        await logTracking(connection, passId, 'RECEIVER_CONFIRMATION', 'COMPLETED', 'PENDING_RECEIVER_CONFIRMATION', nextStatus, receiverUserId, pass[0].to_location_id, 'receiver');
+
+        await connection.commit();
+        return sendResponse(res, 200, true, 'Receipt successfully confirmed');
+    } catch (err) {
+        await connection.rollback();
+        return sendResponse(res, 500, false, err.message);
+    } finally {
+        connection.release();
+    }
+};
+
+const rejectReceiverPortal = async (req, res) => {
+    const { passId, rejected_reason } = req.body;
+    const receiverUserId = req.user.id;
+
+    if (!passId) return sendResponse(res, 400, false, 'Missing pass ID');
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [pass] = await connection.query(
+            'SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', 
+            [passId]
+        );
+
+        if (!pass.length) throw new Error('Pass not found');
+        
+        if (pass[0].status === 'COMPLETED') throw new Error('Action Blocked: Pass already COMPLETED');
+
+        if (parseInt(pass[0].receiver_id) !== parseInt(receiverUserId)) {
+            throw new Error('Unauthorized');
+        }
+
+        if (pass[0].status !== 'PENDING_RECEIVER_CONFIRMATION') {
+            throw new Error(`Invalid stage`);
+        }
+
+        const nextStatus = 'REJECTED_BY_RECEIVER';
+        await connection.query(
+            `UPDATE material_gate_passes SET status = ?, rejected_at = NOW(), rejected_reason = ?, receiver_action_token = NULL WHERE id = ?`,
+            [nextStatus, rejected_reason || 'Rejected by Receiver', passId]
+        );
+
+        await logTracking(connection, passId, 'RECEIVER_CONFIRMATION', 'REJECTED', 'PENDING_RECEIVER_CONFIRMATION', nextStatus, receiverUserId, pass[0].to_location_id, 'receiver');
+
+        await connection.commit();
+        return sendResponse(res, 200, true, 'Receipt rejected');
+    } catch (err) {
+        await connection.rollback();
+        return sendResponse(res, 500, false, err.message);
+    } finally {
+        connection.release();
+    }
+};
+
 module.exports = {
     createMaterialPass,
     previewMaterialPass,
@@ -1140,5 +1370,8 @@ module.exports = {
     getPassesByStatus,
     getPassTracking,
     getDashboardStats,
-    getCompletedPasses
+    getCompletedPasses,
+    confirmReceiverByToken,
+    confirmReceiverPortal,
+    rejectReceiverPortal
 };
