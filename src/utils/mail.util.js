@@ -203,7 +203,7 @@ const sendOriginSecurityEmail = async (email, data) => {
 };
 
 const sendDestinationSecurityEmail = async (email, data) => {
-    const { securityName, dcNumber, origin, destination, userName, managerName, items, approveUrl, rejectUrl } = data;
+    const { securityName, dcNumber, origin, destination, userName, managerName, vehicleNumber, items, approveUrl, rejectUrl } = data;
     const loginUrl = process.env.FRONTEND_URL || 'http://localhost:8000';
 
     const html = `
@@ -219,6 +219,7 @@ const sendDestinationSecurityEmail = async (email, data) => {
                 <p style="margin: 5px 0;"><strong>Pass Type:</strong> ${data.passType === 'RGP' ? 'RGP (Returnable Gate Pass &ndash; Material Will Return)' : 'NRGP (Non-Returnable Gate Pass &ndash; Material Will Not Return)'}</p>
                 <p style="margin: 5px 0;"><strong>Origin:</strong> ${origin}</p>
                 <p style="margin: 5px 0;"><strong>Destination:</strong> ${destination}</p>
+                <p style="margin: 5px 0;"><strong>Vehicle Number:</strong> <span style="font-weight: 700; color: #1e293b; background: #fef08a; padding: 2px 6px; border-radius: 4px; border: 1px solid #facc15;">${vehicleNumber || 'N/A'}</span></p>
                 <p style="margin: 5px 0;"><strong>Submitted By:</strong> ${userName}</p>
                 <p style="margin: 5px 0;"><strong>Approved By:</strong> ${managerName}</p>
             </div>

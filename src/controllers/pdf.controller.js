@@ -1,7 +1,31 @@
 const pool = require('../config/db.config');
 const { sendResponse } = require('../middleware/auth.middleware');
 const puppeteer = require('puppeteer');
-const path = require('path');
+
+// ─── Singleton Browser ────────────────────────────────────────────────────────
+// Reuse one Chromium instance across all PDF requests instead of launching
+// a new browser on every call (saves 1.5–3s per request).
+let browserInstance = null;
+
+const getBrowser = async () => {
+    if (browserInstance && browserInstance.isConnected()) {
+        return browserInstance;
+    }
+    browserInstance = await puppeteer.launch({
+        headless: 'new',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+        ]
+    });
+    // Clean up if the browser crashes or closes unexpectedly
+    browserInstance.on('disconnected', () => {
+        browserInstance = null;
+    });
+    return browserInstance;
+};
 
 const generatePassPDF = async (req, res) => {
     const { id } = req.params;
@@ -92,20 +116,23 @@ const generatePassPDF = async (req, res) => {
             </html>
         `;
 
-        // 4. Launch Puppeteer
-        const browser = await puppeteer.launch({ 
-            headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        // 4. Generate PDF using shared browser instance
+        const browser = await getBrowser();
         const page = await browser.newPage();
-        await page.setContent(htmlContent);
-        const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
-        await browser.close();
-
-        // 5. Send PDF
-        res.contentType('application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename=${pass.dc_number}.pdf`);
-        res.send(pdfBuffer);
+        try {
+            await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
+            const pdfBuffer = await page.pdf({
+                format: 'A4',
+                printBackground: true,
+                margin: { top: '0', right: '0', bottom: '0', left: '0' }
+            });
+            // 5. Send PDF
+            res.contentType('application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename=${pass.dc_number}.pdf`);
+            res.send(pdfBuffer);
+        } finally {
+            await page.close(); // Only close the tab, not the whole browser
+        }
 
     } catch (err) {
         console.error('PDF Gen Error:', err);

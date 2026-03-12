@@ -2,6 +2,19 @@ const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 
+// ─── Singleton Browser ────────────────────────────────────────────────────────
+// Keeps one Chromium process alive across all PDF generates.
+let _browser = null;
+const getBrowser = async () => {
+    if (_browser && _browser.isConnected()) return _browser;
+    _browser = await puppeteer.launch({
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+    });
+    _browser.on('disconnected', () => { _browser = null; });
+    return _browser;
+};
+
 /**
  * Sanitizes input to prevent HTML/PDF injection
  */
@@ -43,14 +56,9 @@ const numberToWords = (num) => {
  * @param {Boolean} isDraft - Whether to show the DRAFT watermark
  */
 const generateChallanPDF = async (passData, isDraft = false) => {
-    let browser;
+    const browser = await getBrowser();
+    const page = await browser.newPage();
     try {
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-        
-        const page = await browser.newPage();
 
         // Prepare and Sanitize data
         const totalQty = passData.items.reduce((acc, item) => acc + Number(item.qty || 0), 0);
@@ -522,7 +530,7 @@ const generateChallanPDF = async (passData, isDraft = false) => {
         </html>
         `;
 
-        await page.setContent(htmlContent);
+        await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
         const pdfBuffer = await page.pdf({
             format: 'A4',
             printBackground: true,
@@ -531,7 +539,7 @@ const generateChallanPDF = async (passData, isDraft = false) => {
 
         return pdfBuffer;
     } finally {
-        if (browser) await browser.close();
+        await page.close(); // Only close the tab, not the whole browser
     }
 };
 

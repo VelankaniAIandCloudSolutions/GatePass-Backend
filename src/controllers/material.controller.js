@@ -452,8 +452,12 @@ const markDispatched = async (req, res) => {
     const { passId, vehicle_number } = req.body;
     const securityUser = req.user;
 
+    if (!vehicle_number || !vehicle_number.trim()) {
+        return sendResponse(res, 400, false, 'Vehicle number is required for dispatch');
+    }
+
     try {
-        await markDispatchedInternal(passId, vehicle_number || 'PORTAL_AUTH', securityUser);
+        await markDispatchedInternal(passId, vehicle_number.trim(), securityUser);
         return sendResponse(res, 200, true, 'Pass cleared at Origin successfully');
     } catch (err) {
         console.error('Portal dispatch error:', err);
@@ -747,6 +751,7 @@ const markDispatchedInternal = async (passId, vehicle_number, securityUser) => {
                                 destination: fullPass.to_location_name,
                                 userName: fullPass.created_by_name,
                                 managerName: approverName,
+                                vehicleNumber: vehicle_number,
                                 items: fullPass.items,
                                 approveUrl: `${baseUrl}/api/material/security/approve?token=${nextToken}&passId=${passId}`,
                                 rejectUrl: `${baseUrl}/api/material/security/reject?token=${nextToken}&passId=${passId}`,
