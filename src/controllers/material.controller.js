@@ -1861,6 +1861,7 @@ const getPassTracking = async (req, res) => {
             destination: pass.to_name || pass.external_address,
             current_status: (pass.status || '').toUpperCase(),
             pass_type: pass.pass_type,
+            movement_type: pass.movement_type?.toLowerCase(),
             receiver_name: pass.receiver_name,
             receiver_confirmed_at: pass.receiver_confirmed_at,
             current_stage: (() => {
