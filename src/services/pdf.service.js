@@ -59,12 +59,50 @@ const generateChallanPDF = async (passData, isDraft = false) => {
     const browser = await getBrowser();
     const page = await browser.newPage();
     try {
-
         // Prepare and Sanitize data
+        const itemCount = passData.items.length;
+        const isReturnMode = !!passData.return_initiated_at || (passData.status && passData.status.toUpperCase().includes('RETURN'));
         const totalQty = passData.items.reduce((acc, item) => acc + Number(item.qty || 0), 0);
-        const totalValue = passData.items.reduce((acc, item) => acc + Number(item.total || 0), 0);
-        const totalWords = sanitizeHTML(numberToWords(totalValue));
         
+        // --- Dynamic Scaling Engine ---
+        // We adjust the entire PDF scale based on the number of items to ensure it fits on one page.
+        // This dynamically reduces font sizes, padding, and heights as item count increases.
+        let baseFontSize = 10;
+        let tablePadding = 8;
+        let headerHeight = 85;
+        let signaturePadding = 15;
+        let rowHeightAdjustment = 0;
+
+        if (itemCount > 35) {
+            baseFontSize = 6.8;
+            tablePadding = 3;
+            headerHeight = 55;
+            signaturePadding = 5;
+            rowHeightAdjustment = -15;
+        } else if (itemCount > 25) {
+            baseFontSize = 7.5;
+            tablePadding = 4;
+            headerHeight = 65;
+            signaturePadding = 8;
+            rowHeightAdjustment = -10;
+        } else if (itemCount > 15) {
+            baseFontSize = 8.5;
+            tablePadding = 6;
+            headerHeight = 75;
+            signaturePadding = 12;
+            rowHeightAdjustment = -5;
+        } else if (itemCount > 8) {
+            baseFontSize = 9.2;
+            tablePadding = 7;
+            headerHeight = 80;
+        } else if (itemCount <= 5) {
+            baseFontSize = 11;
+            tablePadding = 12;
+            headerHeight = 100;
+            signaturePadding = 25;
+            rowHeightAdjustment = 30;
+        }
+
         const logoPath = path.join(__dirname, '../../../frontend/src/assets/image.png');
         let logoBase64 = '';
         try {
@@ -74,11 +112,6 @@ const generateChallanPDF = async (passData, isDraft = false) => {
         } catch (e) {
             console.error('Logo encoding error:', e);
         }
-
-        // Prepare signatures base64
-        let managerSigBase64 = '';
-        let originSigBase64 = '';
-        let destSigBase64 = '';
 
         const loadSignature = (sigPath) => {
             if (!sigPath) return '';
@@ -93,14 +126,25 @@ const generateChallanPDF = async (passData, isDraft = false) => {
             return '';
         };
 
-        managerSigBase64 = loadSignature(passData.manager_signature_path);
-        originSigBase64 = loadSignature(passData.security_origin_signature_path);
-        destSigBase64 = loadSignature(passData.security_destination_signature_path);
-        const adminSigBase64 = loadSignature(passData.admin_signature_path);
+        const managerSigBase64 = loadSignature(passData.approved_by_role === 'admin' ? passData.admin_signature_path : passData.manager_signature_path);
+        const originSigBase64 = loadSignature(passData.security_origin_signature_path);
+        const destSigBase64 = loadSignature(passData.security_destination_signature_path);
         const requesterSigBase64 = loadSignature(passData.created_by_signature_path);
-        const receiverSigBase64 = loadSignature(passData.receiver_signature_path);
+        
+        // Receiver signature only shows up after Receiver Confirmation
+        let receiverSigBase64 = '';
+        const passedReceiverConfirmation = passData.receiver_confirmed_at || 
+            ['COMPLETED', 'PENDING_RETURN_RECEIPT', 'PENDING_RETURN_SECURITY_ORIGIN', 'PENDING_RETURN_SECURITY_DESTINATION'].includes(passData.status);
+            
+        if (passedReceiverConfirmation) {
+            receiverSigBase64 = loadSignature(passData.receiver_signature_path);
+        }
+        
+        const returnOriginSigBase64 = loadSignature(passData.security_return_origin_signature_path);
+        const returnDestSigBase64 = loadSignature(passData.security_return_destination_signature_path);
+        const returnManagerSigBase64 = loadSignature(passData.return_manager_signature_path);
+        const returnConfirmedSigBase64 = loadSignature(passData.return_confirmed_by_signature_path);
 
-        // Format helper: DD-MM-YYYY hh:mm AM/PM (IST)
         const formatIST = (dateStr) => {
             if (!dateStr) return '';
             try {
@@ -120,41 +164,57 @@ const generateChallanPDF = async (passData, isDraft = false) => {
             }
         };
 
+        const isReturnFlowActive = !!passData.return_initiated_at;
+
         const htmlContent = `
         <!DOCTYPE html>
         <html>
         <head>
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+                @font-face {
+                    font-family: 'Inter';
+                    src: url('file://${process.cwd()}/src/assets/fonts/Inter-Regular.ttf') format('truetype');
+                    font-weight: 400;
+                }
+                @font-face {
+                    font-family: 'Inter';
+                    src: url('file://${process.cwd()}/src/assets/fonts/Inter-Bold.ttf') format('truetype');
+                    font-weight: 700;
+                }
                 
                 body { 
-                    font-family: 'Inter', -apple-system, sans-serif; 
+                    font-family: 'Inter', sans-serif; 
                     margin: 0; 
-                    padding: 30px; 
-                    font-size: 10px; 
+                    padding: 25px; 
+                    font-size: ${baseFontSize}px; 
                     color: #0f172a; 
-                    line-height: 1.4;
+                    line-height: 1.3;
+                    height: 100vh;
+                    box-sizing: border-box;
                 }
                 
                 .table-container { 
-                    border: 2px solid #000; 
+                    border: 1.5px solid #000; 
                     width: 100%; 
                     border-collapse: collapse; 
                     background: white;
+                    display: flex;
+                    flex-direction: column;
+                    min-height: 97vh;
+                    box-sizing: border-box;
                 }
                 
                 th, td { 
                     border: 1px solid #000; 
-                    padding: 8px; 
+                    padding: ${tablePadding}px; 
                     text-align: left; 
                     vertical-align: top; 
                 }
                 
-                /* Header Section */
                 .header-top { 
                     display: flex; 
                     align-items: stretch; 
-                    height: 85px; 
+                    height: ${headerHeight}px; 
                 }
                 
                 .logo-block { 
@@ -162,15 +222,14 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                     display: flex; 
                     align-items: center; 
                     justify-content: center; 
-                    border-right: 2px solid #000;
+                    border-right: 1.5px solid #000;
                     padding: 4px;
                 }
                 
                 .logo-img {
-                    max-width: 100%;
-                    max-height: 90%;
+                    max-width: 90%;
+                    max-height: 85%;
                     object-fit: contain;
-                    transform: scale(1.15);
                 }
                 
                 .title-block { 
@@ -179,12 +238,13 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                     flex-direction: column;
                     align-items: center; 
                     justify-content: center; 
-                    font-size: 20px; 
+                    font-size: ${baseFontSize * 1.8}px; 
                     font-weight: 800; 
                     text-transform: uppercase;
-                    letter-spacing: 1px;
-                    border-right: 2px solid #000; 
+                    letter-spacing: 0.5px;
+                    border-right: 1.5px solid #000; 
                     background-color: #f8fafc;
+                    text-align: center;
                 }
                 
                 .meta-block { 
@@ -197,14 +257,14 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                     display: flex; 
                     flex: 1;
                     border-bottom: 1px solid #000; 
-                    font-size: 8px; /* Slightly smaller for more text room */
+                    font-size: ${baseFontSize * 0.85}px;
                 }
                 
                 .meta-row:last-child { border-bottom: none; }
                 
                 .meta-label { 
-                    width: 40%; 
-                    padding: 2px 6px; 
+                    width: 45%; 
+                    padding: 1px 4px; 
                     border-right: 1px solid #000; 
                     font-weight: 700; 
                     display: flex;
@@ -213,40 +273,38 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                 }
                 
                 .meta-value { 
-                    width: 60%; 
-                    padding: 2px 6px; 
+                    width: 55%; 
+                    padding: 1px 4px; 
                     display: flex;
                     align-items: center;
                     font-weight: 600;
-                    word-break: break-all;
                 }
 
                 .sub-header { 
-                    border-top: 2px solid #000; 
-                    padding: 0; 
+                    border-top: 1.5px solid #000; 
                     display: flex;
-                    font-weight: 700;
-                    font-size: 11px;
+                    font-weight: 800;
+                    font-size: ${baseFontSize * 1.1}px;
                 }
                 
                 .sub-header-cell {
-                    padding: 10px 15px;
+                    padding: 6px 12px;
                     flex: 1;
                 }
 
-                .details-row { display: flex; border-top: 2px solid #000; }
-                .details-col { width: 50%; padding: 12px; border-right: 2px solid #000; }
+                .details-row { display: flex; border-top: 1.5px solid #000; }
+                .details-col { width: 50%; padding: ${tablePadding * 1.2}px; border-right: 1.5px solid #000; }
                 .details-col:last-child { border-right: none; }
                 
                 .section-label {
                     background: #f1f5f9;
-                    padding: 6px 12px;
+                    padding: 4px;
                     font-weight: 800;
                     text-transform: uppercase;
-                    letter-spacing: 0.5px;
                     border-bottom: 1px solid #000;
-                    margin: -12px -12px 10px -12px;
+                    margin: -${tablePadding * 1.2}px -${tablePadding * 1.2}px 8px -${tablePadding * 1.2}px;
                     text-align: center;
+                    font-size: ${baseFontSize * 0.9}px;
                 }
 
                 .items-table { 
@@ -257,55 +315,41 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                 
                 .items-table th { 
                     background: #f8fafc; 
-                    padding: 10px 6px;
+                    padding: ${tablePadding}px 4px;
                     font-weight: 800; 
                     text-transform: uppercase;
-                    font-size: 9px;
+                    font-size: ${baseFontSize * 0.85}px;
                     text-align: center;
                 }
                 
                 .items-table td { 
-                    padding: 10px 6px;
+                    padding: ${Math.max(2, tablePadding + (rowHeightAdjustment / 2.5))}px 4px;
                     text-align: center; 
                     font-weight: 500;
+                    font-size: ${baseFontSize * 0.95}px;
                 }
                 
                 .items-table .desc { text-align: left; font-weight: 600; }
 
-                .footer-strip { 
-                    padding: 12px; 
-                    font-weight: 800; 
-                    border-top: 2px solid #000; 
-                    background: #f8fafc;
-                    font-size: 11px;
+                .signature-section {
+                    margin-top: auto;
+                    border-top: 1.5px solid #000;
                 }
-                
-                .terms { 
-                    padding: 15px; 
-                    border-top: 2px solid #000; 
-                }
-                
+
                 .signature-area { 
                     display: flex; 
                     justify-content: space-between; 
-                    padding: 15px; 
-                    margin-top: 20px; 
+                    padding: ${signaturePadding}px; 
                 }
                 
                 .sign-box { 
                     text-align: center; 
-                    width: 30%; 
+                    width: 32%; 
                 }
                 
                 .sign-img { 
-                    max-height: 55px; 
-                    margin-bottom: 4px; 
-                    mix-blend-mode: multiply;
-                }
-
-                .small-sign-img {
-                    max-height: 35px;
-                    margin-top: 8px;
+                    max-height: ${baseFontSize * 3.5}px; 
+                    margin-bottom: 3px; 
                     mix-blend-mode: multiply;
                 }
                 
@@ -313,216 +357,175 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                 .center { text-align: center; }
                 .right { text-align: right; }
 
-                /* Draft Watermark */
                 .draft-watermark {
                     display: ${isDraft ? 'flex' : 'none'};
-                    position: fixed;
-                    top: 50%;
-                    left: 50%;
+                    position: fixed; top: 50%; left: 50%;
                     transform: translate(-50%, -50%) rotate(-45deg);
-                    font-size: 120px;
-                    font-weight: 900;
-                    color: rgba(224, 242, 254, 0.4);
-                    border: 15px solid rgba(224, 242, 254, 0.4);
-                    padding: 20px 60px;
-                    border-radius: 40px;
-                    white-space: nowrap;
-                    pointer-events: none;
-                    z-index: 1000;
-                    text-transform: uppercase;
+                    font-size: 80px; font-weight: 900;
+                    color: rgba(226, 232, 240, 0.3);
+                    border: 8px solid rgba(226, 232, 240, 0.3);
+                    padding: 10px 40px; border-radius: 20px;
+                    z-index: 1000; text-transform: uppercase;
                 }
+                
+                @page { size: A4; margin: 0; }
             </style>
         </head>
         <body>
-            <div class="draft-watermark">FOR PREVIEW</div>
+            <div class="draft-watermark">PREVIEW ONLY</div>
             <div class="table-container">
-                <!-- Top Header -->
                 <div class="header-top">
                     <div class="logo-block">
                         ${logoBase64 ? `<img src="data:image/png;base64,${logoBase64}" class="logo-img" />` : 'LOGO'}
                     </div>
-                    <div class="title-block">Delivery Challan</div>
+                    <div class="title-block">
+                        ${isReturnFlowActive ? 'RETURNABLE GATE PASS &ndash; <br/><span style="font-size: 0.8em;">RETURN MOVEMENT</span>' : 'Delivery Challan'}
+                    </div>
                     <div class="meta-block">
-                        <div class="meta-row">
-                            <div class="meta-label">Doc No.:</div>
-                            <div class="meta-value">L5-VEP-IMS-WHM-08</div>
-                        </div>
-                        <div class="meta-row">
-                            <div class="meta-label">Rev. No.</div>
-                            <div class="meta-value">1</div>
-                        </div>
-                        <div class="meta-row">
-                            <div class="meta-label">Rev. Date</div>
-                            <div class="meta-value">29-08-2024</div>
-                        </div>
+                        <div class="meta-row"><div class="meta-label">Doc No.</div><div class="meta-value">L5-VEP-IMS-WHM-08</div></div>
+                        <div class="meta-row"><div class="meta-label">Rev. No.</div><div class="meta-value">1</div></div>
+                        <div class="meta-row"><div class="meta-label">Rev. Date</div><div class="meta-value">29-08-2024</div></div>
                     </div>
                 </div>
 
-                <!-- DC Number and Date -->
                 <div class="sub-header">
-                    <div class="sub-header-cell" style="border-right: 2px solid #000;">
-                        DELIVERY CHALLAN NO : <span style="font-size: 14px;">${sanitizeHTML(passData.dc_number || 'DRAFT')}</span>
-                    </div>
-                    <div class="sub-header-cell">
-                        DATE : <span style="font-size: 14px;">${new Date(passData.created_at || Date.now()).toLocaleDateString('en-GB')}</span>
-                    </div>
+                    <div class="sub-header-cell" style="border-right: 1.5px solid #000;">NO : <span style="font-size: 1.2em;">${sanitizeHTML(passData.dc_number || 'DRAFT')}</span></div>
+                    <div class="sub-header-cell">DATE : <span style="font-size: 1.2em;">${new Date(passData.created_at || Date.now()).toLocaleDateString('en-GB')}</span></div>
                 </div>
 
-                <!-- Consignor / Consignee -->
                 <div class="details-row">
                     <div class="details-col">
                         <div class="section-label">Consignor Details</div>
-                        <div style="margin-bottom: 4px;"><span class="b">From:</span> ${sanitizeHTML(passData.from_location_name)}</div>
-                        <div style="white-space: pre-line; color: #475569; font-weight: 500;">${sanitizeHTML(passData.from_address)}</div>
-                        
-                        <!-- Single Security Contact line -->
-                        ${passData.origin_security_mobile ? `<div style="margin-top: 6px;"><span class="b">Contact:</span> ${sanitizeHTML(passData.origin_security_mobile)}</div>` : ''}
+                        <div class="b">From: ${sanitizeHTML(passData.from_location_name)}</div>
+                        <div style="font-size: 0.9em; margin-top: 3px;">${sanitizeHTML(passData.from_address)}</div>
+                        ${passData.origin_security_mobile ? `<div style="margin-top: 4px;"><span class="b">Contact:</span> ${sanitizeHTML(passData.origin_security_mobile)}</div>` : ''}
                     </div>
                     <div class="details-col">
                         <div class="section-label">Consignee Details</div>
                         ${passData.movement_type === 'internal' 
-                             ? `<div style="margin-bottom: 4px;"><span class="b">To:</span> ${sanitizeHTML(passData.to_location_name)}</div>
-                                <div style="white-space: pre-line; color: #475569; font-weight: 500;">${sanitizeHTML(passData.to_address_detailed)}</div>`
-                             : `<div style="white-space: pre-line; color: #475569; font-weight: 500;">${sanitizeHTML(passData.external_address)}</div>`
+                             ? `<div class="b">To: ${sanitizeHTML(passData.to_location_name)}</div>
+                                <div style="font-size: 0.9em; margin-top: 3px;">${sanitizeHTML(passData.to_address_detailed)}</div>`
+                             : `<div style="font-size: 0.9em;">${sanitizeHTML(passData.external_address)}</div>`
                          }
-                         
-                         <!-- Single Security Contact line -->
-                         ${passData.destination_security_mobile ? `<div style="margin-top: 6px;"><span class="b">Contact:</span> ${sanitizeHTML(passData.destination_security_mobile)}</div>` : ''}
+                         ${passData.destination_security_mobile ? `<div style="margin-top: 4px;"><span class="b">Contact:</span> ${sanitizeHTML(passData.destination_security_mobile)}</div>` : ''}
                     </div>
                 </div>
 
-                <!-- Logistics Info -->
-                <div style="border-top: 1px solid #000; display: flex;">
-                    <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">Customer Reference :</div>
-                    <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.customer_reference) || '-'}</div>
-                </div>
-                <div style="border-top: 1px solid #000; display: flex;">
-                    <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">No of Boxes :</div>
-                    <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.no_of_boxes) ?? '0'}</div>
-                </div>
-                <div style="border-top: 1px solid #000; display: flex;">
-                    <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">Net Weight (KG) :</div>
-                    <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.net_weight) || '-'}</div>
-                </div>
-                <div style="border-top: 1px solid #000; display: flex;">
-                    <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">Gross Weight (KG) :</div>
-                    <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.gross_weight) || '-'}</div>
-                </div>
-                <div style="border-top: 1px solid #000; display: flex;">
-                    <div style="width: 25%; padding: 4px; border-right: 1px solid #000;" class="b">Vehicle Number :</div>
-                    <div style="width: 75%; padding: 4px;">${sanitizeHTML(passData.vehicle_number) || '-'}</div>
+                <div style="border-top: 1px solid #000; padding: 2px 10px; display: flex; font-size: 0.9em;">
+                    <div style="width: 20%;" class="b">Customer Ref:</div><div style="width: 30%;">${sanitizeHTML(passData.customer_reference) || '-'}</div>
+                    <div style="width: 20%;" class="b">Vehicle No:</div><div style="width: 30%;">${sanitizeHTML(passData.vehicle_number) || '-'}</div>
                 </div>
 
-                <!-- Items Table -->
                 <table class="items-table" style="border-top: 1px solid #000;">
                     <thead>
                         <tr>
-                            <th style="width: 40px; border-left: none;">SL. NO.</th>
-                            <th style="width: 150px;">PART NO.</th>
+                            <th style="width: 30px; border-left: none;">SL</th>
+                            <th style="width: 120px;">PART NO.</th>
                             <th>DESCRIPTION</th>
-                            <th style="width: 80px;">QTY</th>
-                            <th style="width: 150px; border-right: none;">REMARKS</th>
+                            <th style="width: 60px;">QTY</th>
+                            <th style="width: 120px; border-right: none;">REMARKS</th>
                         </tr>
                     </thead>
                     <tbody>
                         ${passData.items.map((item, i) => `
-                            <tr>
+                            <tr ${item.is_return_extra ? 'style="background-color: #fffbeb;"' : ''}>
                                 <td style="border-left: none;">${i + 1}</td>
-                                <td class="b" style="color: #475569;">${sanitizeHTML(item.part_no) || 'NA'}</td>
-                                <td class="desc">${sanitizeHTML(item.description)}</td>
-                                <td class="b" style="font-size: 11px;">${item.qty}</td>
-                                <td style="border-right: none; font-size: 9px; color: #64748b;">${sanitizeHTML(item.remarks) || '-'}</td>
+                                <td class="b">${sanitizeHTML(item.part_no) || 'NA'}</td>
+                                <td class="desc">
+                                    ${sanitizeHTML(item.description)}
+                                    ${item.is_return_extra ? '<div style="font-size: 0.75em; color: #b45309; font-weight: bold; margin-top: 1px;">* Added in Return</div>' : ''}
+                                </td>
+                                <td class="b">${item.qty}</td>
+                                <td style="border-right: none;">${sanitizeHTML(item.remarks) || '-'}</td>
                             </tr>
                         `).join('')}
-                        <!-- Spacer row if few items -->
-                        ${passData.items.length < 5 ? `
-                            <tr style="height: ${150 - (passData.items.length * 35)}px;">
-                                <td style="border-left: none;"></td><td></td><td></td><td></td><td style="border-right: none;"></td>
-                            </tr>
-                        ` : ''}
                     </tbody>
                     <tfoot>
-                        <tr style="background: #f1f5f9; font-weight: 800; font-size: 11px;">
-                            <td colspan="3" class="right" style="border-left: none; padding-right: 20px;">TOTAL QUANTITY</td>
-                            <td class="center" style="background: #fff; border-top: 2px solid #000;">${totalQty}</td>
-                            <td style="border-right: none; background: #f8fafc;"></td>
+                        <tr style="background: #f1f5f9; font-weight: 800;">
+                            <td colspan="3" class="right" style="border-left: none;">TOTAL QTY</td>
+                            <td class="center" style="background: #fff;">${totalQty}</td>
+                            <td style="border-right: none;"></td>
                         </tr>
                     </tfoot>
                 </table>
 
-
-                <div class="terms">
-                    <div class="center b" style="text-decoration: underline; margin-bottom: 10px;">TO WHOM SO EVER IT MAY CONCERN</div>
-                    <div>This is to certify that the package(s) as per the detailed list above are being shipped to the address mentioned above</div>
-                    <div style="margin-top: 10px;">It is Not for Sale. The Value of the unit/s is mentioned for Insurance Purpose Only</div>
-                    
-                    <div style="display: flex; margin-top: 15px;">
-                        <div style="flex: 1;"><span class="b">Remark:</span> ${passData.pass_type === 'RGP' ? 'RGP(Returnable basis)' : 'NRGP(Non-Returnable basis)'}</div>
-                        <div style="flex: 1;"><span class="b">E-Way Bill NO :</span> -</div>
-                    </div>
-                    <div style="display: flex; margin-top: 8px;">
-                        <div style="flex: 1;"><span class="b">Date :</span> ${new Date(passData.created_at || Date.now()).toLocaleDateString('en-GB')}</div>
-                        <div style="flex: 1;"><span class="b">Vehicle# :</span> ${sanitizeHTML(passData.vehicle_number) || '-'}</div>
-                    </div>
-
-                    <!-- Side-by-Side: Requested By and Sent To -->
-                    <div style="display: flex; justify-content: space-between; margin-top: 15px; border-top: 1.5px solid #000; padding-top: 8px;">
-                        <!-- Requested By Section -->
-                        <div style="width: 48%;">
-                            <div class="b" style="text-transform: uppercase; font-size: 11px;">REQUESTED BY: ${sanitizeHTML(passData.created_by_name)}</div>
-                            ${passData.created_user_mobile ? `<div style="font-size: 10px; color: #000; margin-top: 2px;"><span class="b">Contact:</span> ${passData.created_user_mobile}</div>` : ''}
-                            ${requesterSigBase64 ? `<img src="data:image/png;base64,${requesterSigBase64}" style="width: 55px; height: auto; margin-top: 4px; mix-blend-mode: multiply;" />` : ''}
+                <div class="signature-section">
+                    ${isReturnFlowActive ? `
+                        <div style="padding: 6px; border-bottom: 1px solid #000; text-align: center; background: #f8fafc; font-weight: 800; font-size: ${baseFontSize * 0.9}px; color: #1e293b;">
+                            Forward journey completed. All 5 users have signed.
                         </div>
-
-                        <!-- Sent To Section (Only if name exists) -->
-                        ${passData.receiver_name ? `
-                        <div style="width: 48%; text-align: right;">
-                            <div class="b" style="text-transform: uppercase; font-size: 11px;">SENT TO: ${sanitizeHTML(passData.receiver_name)}</div>
-                            ${passData.receiver_mobile ? `<div style="font-size: 10px; color: #000; margin-top: 2px;"><span class="b">Contact:</span> ${passData.receiver_mobile}</div>` : ''}
-                            ${(passData.status === 'COMPLETED' && receiverSigBase64) ? `<img src="data:image/png;base64,${receiverSigBase64}" style="width: 55px; height: auto; margin-top: 4px; mix-blend-mode: multiply;" />` : ''}
-                        </div>
-                        ` : ''}
-                    </div>
-                </div>
-
-                <div class="signature-area" style="display: flex; justify-content: space-between; margin-top: 40px; text-align: center; padding-top: 0;">
-                    <!-- Origin Security Column -->
-                    <div style="width: 30%;">
-                        <div class="b" style="text-transform: uppercase; font-size: 10px; margin-bottom: 5px;">Origin Security</div>
-                        ${passData.security_origin_approved_at ? `
-                            <div style="font-size: 8px; color: #475569; margin-bottom: 5px;">
-                                Approved On: ${formatIST(passData.security_origin_approved_at)}
+                    ` : ''}
+                    <div style="padding: 10px; font-size: 0.85em;">
+                        <span class="b">Remark:</span> ${passData.pass_type} basis. Not for sale. Value for insurance only.
+                        ${isReturnFlowActive ? `
+                            <div style="display: flex; margin-top: 8px; border-top: 1px solid #000; padding-top: 8px;">
+                                <div style="flex: 1;">
+                                    <div class="b" style="text-transform: uppercase;">RETURN INITIATOR (RECEIVER): ${sanitizeHTML(passData.receiver_user_name || passData.receiver_name || '-')}</div>
+                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || '-')}</div>
+                                    ${receiverSigBase64 ? `<img src="data:image/png;base64,${receiverSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_initiated_at)}</div>` : '<div style="height: 30px;"></div>'}
+                                </div>
+                                <div style="flex: 1; text-align: right;">
+                                    <div class="b" style="text-transform: uppercase;">FINAL RECEIVER: ${sanitizeHTML(passData.return_confirmed_by_name || '-')}</div>
+                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.created_user_mobile) || '-'}</div>
+                                    ${returnConfirmedSigBase64 ? `<img src="data:image/png;base64,${returnConfirmedSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_confirmed_at)}</div>` : '<div style="height: 30px;"></div>'}
+                                </div>
                             </div>
-                            ${originSigBase64 ? `<img src="data:image/png;base64,${originSigBase64}" style="height: 35px; mix-blend-mode: multiply;" />` : ''}
-                        ` : '<div style="height: 40px;"></div>'}
-                    </div>
-
-                    <!-- Destination Security Column -->
-                    <div style="width: 30%;">
-                        <div class="b" style="text-transform: uppercase; font-size: 10px; margin-bottom: 5px;">Destination Security</div>
-                        ${passData.security_destination_approved_at ? `
-                            <div style="font-size: 8px; color: #475569; margin-bottom: 5px;">
-                                Approved On: ${formatIST(passData.security_destination_approved_at)}
+                        ` : `
+                            <div style="display: flex; margin-top: 8px; border-top: 1px solid #000; padding-top: 8px;">
+                                <div style="flex: 1;">
+                                    <div class="b" style="text-transform: uppercase;">REQUESTER: ${sanitizeHTML(passData.created_by_name)}</div>
+                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.created_user_mobile) || '-'}</div>
+                                    ${requesterSigBase64 ? `<img src="data:image/png;base64,${requesterSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.created_at)}</div>` : '<div style="height: 30px;"></div>'}
+                                </div>
+                                <div style="flex: 1; text-align: right;">
+                                    <div class="b" style="text-transform: uppercase;">RECEIVER: ${sanitizeHTML(passData.receiver_user_name || passData.receiver_name || '-')}</div>
+                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || '-')}</div>
+                                    ${receiverSigBase64 ? `<img src="data:image/png;base64,${receiverSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.receiver_confirmed_at)}</div>` : '<div style="height: 30px;"></div>'}
+                                </div>
                             </div>
-                            ${destSigBase64 ? `<img src="data:image/png;base64,${destSigBase64}" style="height: 35px; mix-blend-mode: multiply;" />` : ''}
-                        ` : '<div style="height: 40px;"></div>'}
+                        `}
                     </div>
 
-                    <!-- Manager Column -->
-                    <div style="width: 30%;">
-                        <div class="b" style="text-transform: uppercase; font-size: 10px; margin-bottom: 5px;">
-                            ${passData.approved_by_role === 'admin' ? 'Admin (Approved On Behalf)' : 'Manager'}
-                        </div>
-                        ${passData.approved_by_manager_at ? `
-                            <div style="font-size: 8px; color: #475569; margin-bottom: 5px;">
-                                Approved On: ${formatIST(passData.approved_by_manager_at)}
+                    <div class="signature-area">
+                        ${isReturnFlowActive ? `
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">Manager</div>
+                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_manager_name) || '-'}</div>
+                                ${returnManagerSigBase64 ? `<img src="data:image/png;base64,${returnManagerSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                <div style="font-size: 0.65em;">${formatIST(passData.return_approved_manager_at)}</div>
                             </div>
-                            ${passData.approved_by_role === 'admin' 
-                                ? (adminSigBase64 ? `<img src="data:image/png;base64,${adminSigBase64}" style="height: 55px; mix-blend-mode: multiply;" />` : '')
-                                : (managerSigBase64 ? `<img src="data:image/png;base64,${managerSigBase64}" style="height: 55px; mix-blend-mode: multiply;" />` : '')
-                            }
-                        ` : '<div style="height: 60px;"></div>'}
-                        <div style="font-size: 8px; font-weight: 600; color: #64748b; margin-top: 5px;">AUTHORIZED SIGNATORY</div>
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">SG1 Origin</div>
+                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_dispatched_by_name) || '-'}</div>
+                                ${returnOriginSigBase64 ? `<img src="data:image/png;base64,${returnOriginSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                <div style="font-size: 0.65em;">${formatIST(passData.return_dispatched_at)}</div>
+                            </div>
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">SG2 Destination</div>
+                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_received_by_name) || '-'}</div>
+                                ${returnDestSigBase64 ? `<img src="data:image/png;base64,${returnDestSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                <div style="font-size: 0.65em;">${formatIST(passData.return_received_at)}</div>
+                            </div>
+                        ` : `
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">Auth. Signatory</div>
+                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.approved_by_role === 'admin' ? passData.admin_name : passData.manager_name) || '-'}</div>
+                                ${managerSigBase64 ? `<img src="data:image/png;base64,${managerSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                <div style="font-size: 0.65em;">${formatIST(passData.approved_by_manager_at)}</div>
+                            </div>
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">Origin Security</div>
+                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.dispatched_by_name) || '-'}</div>
+                                ${originSigBase64 ? `<img src="data:image/png;base64,${originSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                <div style="font-size: 0.65em;">${formatIST(passData.security_origin_approved_at)}</div>
+                            </div>
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">Destination Security</div>
+                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.received_by_name) || '-'}</div>
+                                ${destSigBase64 ? `<img src="data:image/png;base64,${destSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                <div style="font-size: 0.65em;">${formatIST(passData.security_destination_approved_at)}</div>
+                            </div>
+                        `}
                     </div>
                 </div>
             </div>
@@ -530,20 +533,17 @@ const generateChallanPDF = async (passData, isDraft = false) => {
         </html>
         `;
 
-        await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
+        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
         const pdfBuffer = await page.pdf({
             format: 'A4',
             printBackground: true,
-            margin: { top: '30px', bottom: '30px', left: '30px', right: '30px' }
+            margin: { top: '0px', bottom: '0px', left: '0px', right: '0px' }
         });
 
         return pdfBuffer;
     } finally {
-        await page.close(); // Only close the tab, not the whole browser
+        await page.close();
     }
 };
 
-module.exports = {
-    generateChallanPDF,
-    sanitizeHTML
-};
+module.exports = { generateChallanPDF, sanitizeHTML };

@@ -10,12 +10,14 @@ const login = async (req, res) => {
     const { email, password } = req.body;
 
     try {
+        console.log('Login attempt for email:', email);
         const [users] = await pool.query(
             'SELECT * FROM users WHERE email = ?', 
             [email]
         );
         
         if (users.length === 0) {
+            console.log('No user found with email:', email);
             return sendResponse(res, 401, false, 'Invalid credentials');
         }
 
@@ -26,6 +28,7 @@ const login = async (req, res) => {
         }
 
         const isMatch = await bcrypt.compare(password, user.password);
+        console.log('Password match:', isMatch);
         if (!isMatch) {
             return sendResponse(res, 401, false, 'Invalid credentials');
         }

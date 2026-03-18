@@ -4,11 +4,11 @@ const materialController = require('../controllers/material.controller');
 const { protect, authorize, requireLocation } = require('../middleware/auth.middleware');
 
 // 1. User: Create Pass
-router.post('/create', protect, authorize('user'), materialController.createMaterialPass);
-router.post('/preview', protect, authorize('user'), materialController.pdfLimiter, materialController.previewMaterialPass);
+router.post('/create', protect, authorize('user', 'admin'), materialController.createMaterialPass);
+router.post('/preview', protect, authorize('user', 'admin'), materialController.pdfLimiter, materialController.previewMaterialPass);
 
 // 2. Manager Actions
-router.post('/manager/update', protect, authorize('manager'), materialController.updateManagerStatus);
+router.post('/manager/update', protect, authorize('manager', 'admin'), materialController.updateManagerStatus);
 
 // 2.1 Token-Based Public Actions (For Email Buttons)
 router.get('/manager/approve', materialController.approveMaterialByToken);
@@ -21,18 +21,27 @@ router.get('/security/reject', materialController.rejectSecurityByToken);
 
 // 2.2 Receiver Actions
 router.get('/confirm-receiver', materialController.confirmReceiverByToken);
+router.get('/return/initiate-form', materialController.getReturnInitiationForm);
+router.post('/return/initiate', materialController.initiateReturn); // Public endpoint handles token or auth
 router.post('/confirm-receiver-portal', protect, materialController.confirmReceiverPortal);
 router.post('/reject-receiver-portal', protect, materialController.rejectReceiverPortal);
 
+// 2.3 RGP Return Flow Actions
+router.post('/initiate-return', protect, authorize('user', 'admin'), materialController.initiateReturn);
+router.post('/confirm-return-receipt', protect, authorize('user', 'admin'), materialController.confirmReturnReceipt);
+
 // 3. Security Dashboard Actions
-router.post('/security/dispatch', protect, authorize('security'), requireLocation('dispatch'), materialController.markDispatched);
-router.post('/security/receive', protect, authorize('security'), requireLocation('receiving'), materialController.markReceived);
-router.post('/security/reject', protect, authorize('security'), materialController.rejectSecurityStatus);
+router.post('/security/dispatch', protect, authorize('security', 'admin'), requireLocation('dispatch'), materialController.markDispatched);
+router.post('/security/receive', protect, authorize('security', 'admin'), requireLocation('receiving'), materialController.markReceived);
+router.post('/security/reject', protect, authorize('security', 'admin'), materialController.rejectSecurityStatus);
+// Return flow security actions
+router.post('/security/return-dispatch', protect, authorize('security', 'admin'), materialController.markReturnDispatched);
+router.post('/security/return-receive', protect, authorize('security', 'admin'), materialController.markReturnReceived);
 
 router.get('/track', protect, materialController.getPassTracking);
 router.get('/pending', protect, materialController.getPendingPasses);
 router.get('/dashboard-stats', protect, materialController.getDashboardStats);
-router.get('/status/completed', protect, materialController.getCompletedPasses);
+router.get('/history', protect, materialController.getHistoryPasses);
 router.get('/status/:status', protect, materialController.getPassesByStatus);
 router.get('/pdf/:id', protect, materialController.pdfLimiter, materialController.getPassPDF);
 

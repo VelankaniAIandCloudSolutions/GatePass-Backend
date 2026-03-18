@@ -11,9 +11,17 @@ const app = express();
 // Middlewares
 app.use(express.json());
 
+app.use((req, res, next) => {
+    if (req.url !== '/favicon.ico') {
+        console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+        if (req.method === 'POST') console.log('Body:', req.body);
+    }
+    next();
+});
+
 // CORS Configuration
 const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'http://localhost:8000',
+    origin: '*',
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
     optionsSuccessStatus: 204

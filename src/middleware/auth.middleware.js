@@ -54,13 +54,14 @@ const protect = async (req, res, next) => {
     }
 };
 
-const requireRole = (roles) => {
+const requireRole = (...roles) => {
     return (req, res, next) => {
         if (!req.user) {
             return sendResponse(res, 401, false, 'Authentication Required');
         }
 
-        const allowedRoles = Array.isArray(roles) ? roles : [roles];
+        // Handle both: authorize('admin') and authorize(['admin', 'manager'])
+        const allowedRoles = roles.flat();
 
         if (!allowedRoles.includes(req.user.role)) {
             return sendResponse(res, 403, false, 'Access Forbidden: Insufficient Permissions');
