@@ -592,6 +592,64 @@ const sendRejectionEmail = async (email, data) => {
     });
 };
 
+
+const sendExternalNRGPCompletionEmail = async (email, data) => {
+    const {
+        recipientName, dcNumber, driverName, driverPhone, vehicleNumber,
+        origin, externalAddress, completedAt, loginUrl
+    } = data;
+
+    const formattedDate = (() => {
+        try {
+            const d = new Date(completedAt);
+            return d.toLocaleString('en-IN', {
+                timeZone: 'Asia/Kolkata',
+                day: '2-digit', month: '2-digit', year: 'numeric',
+                hour: '2-digit', minute: '2-digit', hour12: true
+            }).replace(/\//g, '-').replace(',', '') + ' (IST)';
+        } catch { return completedAt || 'N/A'; }
+    })();
+
+    const html = `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; background: #10b981; color: white; padding: 8px 16px; border-radius: 8px; font-weight: bold;">GatePass ✅</div>
+            </div>
+            <h2 style="color: #1e293b; text-align: center; margin-bottom: 20px;">External NRGP – Pass Completed</h2>
+            <p style="color: #475569;">Hello <strong>${recipientName}</strong>,</p>
+            <p style="color: #475569;">Gate Pass <strong>${dcNumber}</strong> (External NRGP) has been successfully dispatched by Origin Security and is now <strong>COMPLETED</strong>.</p>
+
+            <div style="background: #f0fdf4; padding: 25px; border-radius: 12px; margin: 25px 0; border: 1px solid #dcfce7;">
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Pass Type:</strong> External NRGP (Non-Returnable)</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Origin:</strong> ${origin || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>External Destination:</strong> ${externalAddress || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Completed At:</strong> ${formattedDate}</p>
+            </div>
+
+            <div style="background: #f8fafc; padding: 20px 25px; border-radius: 12px; margin: 20px 0; border: 1px solid #e2e8f0;">
+                <p style="margin: 0 0 10px 0; font-weight: 700; color: #374151; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;">Cab Driver Details</p>
+                <p style="margin: 5px 0; font-size: 15px; color: #1e293b;"><strong>Driver Name:</strong> ${driverName}</p>
+                <p style="margin: 5px 0; font-size: 15px; color: #1e293b;"><strong>Driver Phone:</strong> ${driverPhone}</p>
+                <p style="margin: 5px 0; font-size: 15px; color: #1e293b;"><strong>Vehicle Number:</strong> ${vehicleNumber || 'N/A'}</p>
+            </div>
+
+            <div style="text-align: center; margin-top: 30px;">
+                <a href="${loginUrl}" style="background-color: #4f46e5; color: white; padding: 14px 35px; border-radius: 10px; text-decoration: none; font-weight: bold; display: inline-block;">View in Portal</a>
+            </div>
+
+            <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                This is an automated notification from the GatePass System.
+            </p>
+        </div>
+    `;
+
+    return await sendMailInternal({
+        to: email,
+        subject: `Completed: External NRGP Dispatched – ${dcNumber}`,
+        html: html
+    });
+};
+
 module.exports = { 
     sendOTPEmail, 
     sendNotificationEmail, 
@@ -603,5 +661,7 @@ module.exports = {
     sendReturnDestinationSecurityEmail,
     sendReturnOriginSecurityEmail,
     sendReturnCompletionEmail,
-    sendRejectionEmail
+    sendRejectionEmail,
+    sendExternalNRGPCompletionEmail
 };
+

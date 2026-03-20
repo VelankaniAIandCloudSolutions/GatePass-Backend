@@ -461,7 +461,7 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                             <div style="display: flex; margin-top: 8px; border-top: 1px solid #000; padding-top: 8px;">
                                 <div style="flex: 1;">
                                     <div class="b" style="text-transform: uppercase;">RETURN INITIATOR (RECEIVER): ${sanitizeHTML(passData.receiver_user_name || passData.receiver_name || '-')}</div>
-                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || '-')}</div>
+                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || passData.receiver_phone || '-')}</div>
                                     ${receiverSigBase64 ? `<img src="data:image/png;base64,${receiverSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_initiated_at)}</div>` : '<div style="height: 30px;"></div>'}
                                 </div>
                                 <div style="flex: 1; text-align: right;">
@@ -479,7 +479,7 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                                 </div>
                                 <div style="flex: 1; text-align: right;">
                                     <div class="b" style="text-transform: uppercase;">RECEIVER: ${sanitizeHTML(passData.receiver_user_name || passData.receiver_name || '-')}</div>
-                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || '-')}</div>
+                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || passData.receiver_phone || '-')}</div>
                                     ${receiverSigBase64 ? `<img src="data:image/png;base64,${receiverSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.receiver_confirmed_at)}</div>` : '<div style="height: 30px;"></div>'}
                                 </div>
                             </div>
@@ -519,13 +519,25 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                                 ${originSigBase64 ? `<img src="data:image/png;base64,${originSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
                                 <div style="font-size: 0.65em;">${formatIST(passData.security_origin_approved_at)}</div>
                             </div>
+                            ${passData.movement_type === 'external' && ['NRGP', 'RGP'].includes(passData.pass_type) ? `
+                            <div class="sign-box">
+                                <div class="b uppercase" style="font-size: 0.8em;">Cab Driver Details</div>
+                                ${passData.driver_name ? `<div style="font-size: 0.75em; margin-bottom: 2px; font-weight: 700;">${sanitizeHTML(passData.driver_name)}</div>` : '<div style="font-size: 0.7em; margin-bottom: 2px; color: #94a3b8;">-</div>'}
+                                ${passData.driver_phone ? `<div style="font-size: 0.7em; color: #1e293b; margin-bottom: 2px;">Phone: ${sanitizeHTML(passData.driver_phone)}</div>` : ''}
+                                ${passData.vehicle_number ? `<div style="font-size: 0.7em; color: #1e293b; margin-bottom: 4px;">Vehicle: ${sanitizeHTML(passData.vehicle_number)}</div>` : ''}
+                                <div style="border-bottom: 1.5px solid #374151; margin: 8px 4px 4px 4px;"></div>
+                                <div style="font-size: 0.6em; color: #64748b; margin-top: 3px;">Driver Signature (Physical)</div>
+                            </div>
+                            ` : `
                             <div class="sign-box">
                                 <div class="b uppercase" style="font-size: 0.8em;">Destination Security</div>
                                 <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.received_by_name) || '-'}</div>
                                 ${destSigBase64 ? `<img src="data:image/png;base64,${destSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
                                 <div style="font-size: 0.65em;">${formatIST(passData.security_destination_approved_at)}</div>
                             </div>
+                            `}
                         `}
+
                     </div>
                 </div>
             </div>

@@ -37,6 +37,9 @@ router.post('/security/reject', protect, authorize('security', 'admin'), materia
 // Return flow security actions
 router.post('/security/return-dispatch', protect, authorize('security', 'admin'), materialController.markReturnDispatched);
 router.post('/security/return-receive', protect, authorize('security', 'admin'), materialController.markReturnReceived);
+// External NRGP: SG1 assigns driver and completes pass
+router.post('/security/external-nrgp-complete', protect, authorize('security', 'admin'), materialController.markExternalNRGPComplete);
+
 
 router.get('/track', protect, materialController.getPassTracking);
 router.get('/pending', protect, materialController.getPendingPasses);
