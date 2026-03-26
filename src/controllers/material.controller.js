@@ -36,6 +36,8 @@ const fetchFullPassData = async (passId) => {
             p.rejected_reason,
             p.rejected_role,
             p.rejected_at,
+            p.return_driver_name,
+            p.return_driver_phone,
             rec.name as receiver_user_name,
             au.name as admin_name,
             au.signature_path as admin_signature_path,
@@ -73,7 +75,8 @@ const fetchFullPassData = async (passId) => {
             rmu.name as return_manager_name,
             rmu.signature_path as return_manager_signature_path,
             rcu.name as return_confirmed_by_name,
-            rcu.signature_path as return_confirmed_by_signature_path
+            rcu.signature_path as return_confirmed_by_signature_path,
+            (SELECT SUM(qty) FROM material_items WHERE material_pass_id = p.id) as total_qty
         FROM material_gate_passes p
         LEFT JOIN users u ON p.created_by = u.id
         LEFT JOIN locations fl ON p.from_location_id = fl.id
@@ -108,23 +111,23 @@ const getDashboardConditions = (role, userId, siteId) => {
     let pendingParams = [];
     let activeParams = [];
 
-    const pendingStatusesStr = "'PENDING_MANAGER', 'PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION', 'PENDING_RECEIVER_CONFIRMATION', 'PENDING_RETURN_MANAGER', 'PENDING_RETURN_SECURITY_DESTINATION', 'PENDING_RETURN_SECURITY_ORIGIN', 'PENDING_RETURN_RECEIPT'";
+    const pendingStatusesStr = "'PENDING_MANAGER', 'PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION', 'PENDING_RECEIVER_CONFIRMATION', 'PENDING_RETURN_MANAGER', 'PENDING_RETURN_SECURITY_DESTINATION', 'PENDING_RETURN_SECURITY_ORIGIN', 'PENDING_RETURN_RECEIPT', 'PENDING_RETURN_RECEIVER_CONFIRMATION', 'PENDING_RETURN_SG', 'PENDING_CREATOR_CONFIRMATION'";
     const finalStatusesStr = "'COMPLETED', 'REJECTED', 'REJECTED_BY_RECEIVER'";
 
     if (role === 'admin') {
-        pendingCond = `UPPER(p.status) IN (${pendingStatusesStr})`;
+        pendingCond = `(UPPER(p.status) IN (${pendingStatusesStr}))`;
         activeCond = `UPPER(p.status) NOT IN (${finalStatusesStr}) AND NOT (${pendingCond})`;
     } else if (role === 'manager') {
         pendingCond = `UPPER(p.status) IN ('PENDING_MANAGER', 'PENDING_RETURN_MANAGER') AND EXISTS (SELECT 1 FROM user_managers um WHERE um.user_id = p.created_by AND um.manager_id = ?)`;
         pendingParams.push(userId);
         
         // Active = already handled by this manager but still ongoing
-        activeCond = `(p.approved_by_manager_id = ? OR p.return_approved_by_id = ? OR p.approved_by_id = ? OR EXISTS (SELECT 1 FROM material_tracking_logs mtl WHERE mtl.material_id = p.id AND mtl.acted_by = ?)) AND UPPER(p.status) NOT IN (${finalStatusesStr}) AND NOT (UPPER(p.status) IN ('PENDING_MANAGER', 'PENDING_RETURN_MANAGER'))`;
-        activeParams.push(userId, userId, userId, userId);
+        activeCond = `(p.approved_by_manager_id = ? OR p.return_approved_by_id = ? OR p.approved_by_id = ? OR EXISTS (SELECT 1 FROM material_tracking_logs mtl WHERE mtl.material_id = p.id AND mtl.acted_by = ?)) AND UPPER(p.status) NOT IN (${finalStatusesStr}) AND NOT (${pendingCond})`;
+        activeParams.push(userId, userId, userId, userId, userId);
     } else if (role === 'security') {
         pendingCond = `(
             (UPPER(p.status) = 'PENDING_SECURITY_ORIGIN' AND p.from_location_id = ?) OR
-            (UPPER(p.status) = 'PENDING_RETURN_SECURITY_ORIGIN' AND p.from_location_id = ?) OR
+            (UPPER(p.status) = 'PENDING_RETURN_SG' AND p.from_location_id = ?) OR
             (UPPER(p.status) = 'PENDING_SECURITY_DESTINATION' AND p.to_location_id = ?) OR
             (UPPER(p.status) = 'PENDING_RETURN_SECURITY_DESTINATION' AND p.to_location_id = ?)
         )`;
@@ -137,12 +140,14 @@ const getDashboardConditions = (role, userId, siteId) => {
         // User / Receiver role
         pendingCond = `(
             (UPPER(p.status) = 'PENDING_RECEIVER_CONFIRMATION' AND p.receiver_id = ?) OR
-            (UPPER(p.status) = 'PENDING_RETURN_RECEIPT' AND p.created_by = ?)
+            (UPPER(p.status) = 'PENDING_RETURN_RECEIPT' AND p.created_by = ?) OR
+            (UPPER(p.status) = 'PENDING_RETURN_RECEIVER_CONFIRMATION' AND p.created_by = ?) OR
+            (UPPER(p.status) = 'PENDING_CREATOR_CONFIRMATION' AND p.created_by = ?)
         )`;
-        pendingParams.push(userId, userId);
+        pendingParams.push(userId, userId, userId, userId);
         
         activeCond = `(p.created_by = ? OR p.receiver_id = ? OR EXISTS (SELECT 1 FROM material_tracking_logs mtl WHERE mtl.material_id = p.id AND mtl.acted_by = ?)) AND UPPER(p.status) NOT IN (${finalStatusesStr}) AND NOT (${pendingCond})`;
-        activeParams.push(userId, userId, userId, userId, userId);
+        activeParams.push(userId, userId, userId, userId, userId, userId, userId);
     }
 
     return { pendingCond, activeCond, pendingParams, activeParams };
@@ -255,6 +260,8 @@ const previewMaterialPass = async (req, res) => {
             gross_weight,
             receiver_name: finalReceiverName,
             receiver_mobile: finalReceiverMobile,
+            receiver_phone: receiver_phone || null,
+            receiver_email: receiver_email || null,
             pass_type: pass_type || 'RGP',
             items: items.map(i => ({ ...i, unit_cost: 0, total: 0 })),
             created_by_signature_path: req.user.signature_path || null
@@ -289,14 +296,20 @@ const createMaterialPass = async (req, res) => {
         return sendResponse(res, 400, false, 'From and To locations cannot be the same');
     }
 
-    const isExternalNRGP = movement_type === 'external' && (pass_type === 'NRGP' || req.body.pass_type === 'NRGP');
+    const isExternalManual = movement_type === 'external' && ['RGP', 'NRGP'].includes(pass_type);
 
-    if (isExternalNRGP) {
-        // External NRGP: manual receiver – receiverName is REQUIRED
+    if (isExternalManual) {
+        // External RGP/NRGP: manual receiver – receiverName is REQUIRED
         const cleanReceiverName = (receiver_name || '').trim();
+        const cleanExternalAddress = (external_address || '').trim();
+
         if (!cleanReceiverName) {
-            return sendResponse(res, 400, false, 'Receiver name is required for External NRGP');
+            return sendResponse(res, 400, false, 'Receiver name is required for all external shipments');
         }
+        if (!cleanExternalAddress) {
+            return sendResponse(res, 400, false, 'Receiver address is required for all external shipments');
+        }
+
         // Optional email format check
         if (receiver_email && receiver_email.trim()) {
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -305,9 +318,9 @@ const createMaterialPass = async (req, res) => {
             }
         }
         // Optional phone: 10 digits if provided
-        const receiver_phone = req.body.receiver_phone;
-        if (receiver_phone && receiver_phone.trim()) {
-            if (!/^[0-9]{10}$/.test(receiver_phone.trim())) {
+        const cleanPhone = (receiver_phone || '').trim();
+        if (cleanPhone) {
+            if (!/^[0-9]{10}$/.test(cleanPhone)) {
                 return sendResponse(res, 400, false, 'Receiver phone must be exactly 10 digits');
             }
         }
@@ -354,7 +367,7 @@ const createMaterialPass = async (req, res) => {
                 dc_number, created_by, movement_type, pass_type || 'RGP', from_location_id, 
                 movement_type === 'internal' ? to_location_id : null, 
                 movement_type === 'external' ? external_address : null,
-                receiver_id || null, 
+                movement_type === 'external' ? null : (receiver_id || null), 
                 receiver_name?.trim() || null, 
                 receiver_mobile?.trim() || null,
                 receiver_email?.trim() || null,
@@ -737,7 +750,7 @@ const updateManagerStatus = async (req, res) => {
 
 // 6. DISPATCH (Security) - Strict Guard (Status + Location)
 const markDispatched = async (req, res) => {
-    const { passId, vehicle_number } = req.body;
+    const { passId, vehicle_number, driver_name, driver_phone } = req.body;
     const securityUser = req.user;
 
     if (!vehicle_number || !vehicle_number.trim()) {
@@ -745,7 +758,7 @@ const markDispatched = async (req, res) => {
     }
 
     try {
-        await markDispatchedInternal(passId, vehicle_number.trim(), securityUser);
+        await markDispatchedInternal(passId, vehicle_number.trim(), securityUser, driver_name, driver_phone);
         return sendResponse(res, 200, true, 'Pass cleared at Origin successfully');
     } catch (err) {
         console.error('Portal dispatch error:', err);
@@ -755,11 +768,11 @@ const markDispatched = async (req, res) => {
 
 // 7. RECEIVE (Security) - Strict Guard (Status + Location)
 const markReceived = async (req, res) => {
-    const { passId } = req.body;
+    const { passId, vehicle_number, driver_name, driver_phone } = req.body;
     const securityUser = req.user;
 
     try {
-        await markReceivedInternal(passId, securityUser);
+        await markReceivedInternal(passId, securityUser, vehicle_number, driver_name, driver_phone);
         return sendResponse(res, 200, true, 'Pass received & completed successfully');
     } catch (err) {
         console.error('Portal receive error:', err);
@@ -990,7 +1003,7 @@ const handleSecurityTokenAction = async (req, res, token, passId, action) => {
 
         // Requirements: SG1 allowed only when PENDING_SECURITY_ORIGIN, SG2 only when PENDING_SECURITY_DESTINATION
         // RGP handles PENDING_RETURN_SECURITY_ORIGIN / DESTINATION
-        const validStatuses = ['PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION', 'PENDING_RETURN_SECURITY_ORIGIN', 'PENDING_RETURN_SECURITY_DESTINATION'];
+        const validStatuses = ['PENDING_SECURITY_ORIGIN', 'PENDING_SECURITY_DESTINATION', 'PENDING_RETURN_SECURITY_ORIGIN', 'PENDING_RETURN_SECURITY_DESTINATION', 'PENDING_RETURN_SG', 'DISPATCHED'];
         if (!validStatuses.includes(currentStatus)) {
              return renderHtmlResponse(false, 'Action Blocked', 'This request has already been processed.');
         }
@@ -1021,7 +1034,7 @@ const handleSecurityTokenAction = async (req, res, token, passId, action) => {
             }
 
             let targetLocationId;
-            if (currentStatus === 'PENDING_SECURITY_ORIGIN' || currentStatus === 'PENDING_RETURN_SECURITY_ORIGIN') {
+            if (currentStatus === 'PENDING_SECURITY_ORIGIN' || currentStatus === 'PENDING_RETURN_SECURITY_ORIGIN' || currentStatus === 'PENDING_RETURN_SG') {
                 targetLocationId = passRecord.from_location_id;
             } else if (currentStatus === 'PENDING_SECURITY_DESTINATION' || currentStatus === 'PENDING_RETURN_SECURITY_DESTINATION') {
                 targetLocationId = passRecord.to_location_id;
@@ -1131,13 +1144,46 @@ const handleSecurityTokenAction = async (req, res, token, passId, action) => {
             
             await markReturnDispatchedInternal(passId, returnVehicleNumber, securityUser);
             return markTokenUsedAndRender('Return Dispatched', 'Returned material has been successfully marked as DISPATCHED.');
-        } else if (currentStatus === 'PENDING_RETURN_SECURITY_ORIGIN') {
-            // RGP Return Receive
+        } else if (currentStatus === 'PENDING_RETURN_SECURITY_ORIGIN' || currentStatus === 'PENDING_RETURN_SG') {
+            // Check if this is External RGP – different confirmation path
+            const isExternalRGP = passRecord.movement_type === 'external' && passRecord.pass_type === 'RGP';
             let [security] = await pool.query("SELECT * FROM users WHERE role = 'security' AND location_id = ? AND status = 'active' LIMIT 1", [passRecord.from_location_id]);
             const securityUser = security.length > 0 ? security[0] : { id: 0, name: 'System (Security Token)', role: 'security', location_id: passRecord.from_location_id };
-            
-            await markReturnReceivedInternal(passId, securityUser);
-            return markTokenUsedAndRender('Return Received', 'Returned material has been successfully marked as RECEIVED.');
+
+            if (isExternalRGP) {
+                // External RGP: SG1 confirms return → PENDING_RETURN_RECEIVER_CONFIRMATION
+                await markExternalRGPReturnConfirmedInternal(passId, securityUser);
+                return markTokenUsedAndRender('Return Confirmed', 'External RGP return has been confirmed. The creator will now verify receipt.');
+            } else {
+                // Internal RGP: existing logic
+                await markReturnReceivedInternal(passId, securityUser);
+                return markTokenUsedAndRender('Return Received', 'Returned material has been successfully marked as RECEIVED.');
+            }
+        } else if (currentStatus === 'DISPATCHED' || (currentStatus === 'PENDING_RETURN_SG' && passRecord.movement_type === 'external')) {
+            // External RGP: SG1 starts the return – show form for return vehicle number
+            const returnVehicleNumber = req.query.return_vehicle_number;
+            const isExternalRGP = passRecord.movement_type === 'external' && passRecord.pass_type === 'RGP';
+            if (!isExternalRGP) {
+                return renderHtmlResponse(false, 'Action Blocked', 'Only External RGP passes can initiate return from this link.');
+            }
+            if (!returnVehicleNumber || !returnVehicleNumber.trim()) {
+                const returnForm = `
+                    <div style="margin-top: 25px; padding-top: 25px; border-top: 1px solid #e2e8f0;">
+                        <form action="/api/material/security/approve" method="GET">
+                            <input type="hidden" name="token" value="${token}" />
+                            <input type="hidden" name="passId" value="${passId}" />
+                            <label style="display: block; font-size: 14px; font-weight: 600; color: #1e293b; margin-bottom: 8px; text-align: left;">Return Vehicle Number (Required):</label>
+                            <input type="text" name="return_vehicle_number" placeholder="e.g. KA01AB1234" required style="width: 100%; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; margin-bottom: 20px; box-sizing: border-box;" />
+                            <button type="submit" style="width: 100%; background: #7c3aed; color: white; padding: 12px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer;">🚛 Start Return Journey</button>
+                        </form>
+                    </div>
+                `;
+                return renderHtmlResponse(true, 'Start Return', `Please provide the return vehicle number for ${passRecord.dc_number}.`, returnForm);
+            }
+            let [sg1] = await pool.query("SELECT * FROM users WHERE role = 'security' AND location_id = ? AND status = 'active' LIMIT 1", [passRecord.from_location_id]);
+            const sg1User = sg1.length > 0 ? sg1[0] : { id: 0, name: 'System (Security Token)', role: 'security', location_id: passRecord.from_location_id };
+            await markExternalRGPReturnStartInternal(passId, returnVehicleNumber.trim(), sg1User);
+            return markTokenUsedAndRender('Return Started', 'External RGP return journey has been initiated. SG1 will confirm when material arrives.');
         } else {
             return renderHtmlResponse(true, 'Already Handled', `This request is already in ${currentStatus.replace(/_/g, ' ')} stage.`);
         }
@@ -1161,7 +1207,7 @@ const handleSecurityTokenAction = async (req, res, token, passId, action) => {
 };
 
 // Internal helpers to avoid duplicating complex logic
-const markDispatchedInternal = async (passId, vehicle_number, securityUser) => {
+const markDispatchedInternal = async (passId, vehicle_number, securityUser, driver_name = null, driver_phone = null) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -1183,9 +1229,8 @@ const markDispatchedInternal = async (passId, vehicle_number, securityUser) => {
         const nextToken = crypto.randomBytes(32).toString('hex');
         
         const [result] = await connection.query(
-            `UPDATE material_gate_passes SET status = ?, dispatched_by = ?, security_origin_approved_at = NOW(), vehicle_number = ? 
-             WHERE id = ? AND status = 'PENDING_SECURITY_ORIGIN'`,
-            [nextStatus, securityUser.id, vehicle_number, passId]
+            "UPDATE material_gate_passes SET status = ?, dispatched_by = ?, security_origin_approved_at = NOW(), vehicle_number = ?, driver_name = ?, driver_phone = ?, dispatched_at = NOW() WHERE id = ? AND status IN ('PENDING_SECURITY_ORIGIN', 'approved', 'APPROVED')",
+            [nextStatus, securityUser.id, vehicle_number, driver_name, driver_phone, passId]
         );
         
         if (result.affectedRows === 0) throw new Error('Update failed (Security Race Condition)');
@@ -1250,7 +1295,7 @@ const markDispatchedInternal = async (passId, vehicle_number, securityUser) => {
     } finally { connection.release(); }
 };
 
-const markReceivedInternal = async (passId, securityUser) => {
+const markReceivedInternal = async (passId, securityUser, vehicle_number = null, driver_name = null, driver_phone = null) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -1273,9 +1318,8 @@ const markReceivedInternal = async (passId, securityUser) => {
         const nextStatus = 'PENDING_RECEIVER_CONFIRMATION';
 
         const [result] = await connection.query(
-            `UPDATE material_gate_passes SET status = ?, received_by = ?, security_destination_approved_at = NOW()
-             WHERE id = ? AND status = 'PENDING_SECURITY_DESTINATION'`, 
-            [nextStatus, securityUser.id, passId]
+            "UPDATE material_gate_passes SET status = 'COMPLETED', security_destination_approved_by = ?, security_destination_approved_at = NOW(), completed_at = NOW(), vehicle_number = COALESCE(?, vehicle_number), driver_name = COALESCE(?, driver_name), driver_phone = COALESCE(?, driver_phone) WHERE id = ? AND status = 'PENDING_SECURITY_DESTINATION'",
+            [securityUser.id, vehicle_number, driver_name, driver_phone, passId]
         );
 
         if (result.affectedRows === 0) throw new Error('Update failed (Security Race Condition)');
@@ -1476,7 +1520,12 @@ const confirmReceiverByToken = async (req, res) => {
             );
         } else {
             const isRGP = pass.pass_type === 'RGP';
-            nextStatus = isRGP ? 'PENDING_RECEIVER_CONFIRMATION' : 'COMPLETED';
+            const isExternalRGP = pass.movement_type === 'external' && isRGP;
+            
+            // External RGP advances to PENDING_RETURN_SG (where Return Start button appears)
+            // Internal RGP stays in P_R_C until return is initiated.
+            nextStatus = isExternalRGP ? 'PENDING_RETURN_SG' : (isRGP ? 'PENDING_RECEIVER_CONFIRMATION' : 'COMPLETED');
+            
             currentLogStage = 'RECEIVER_CONFIRMATION';
             prevStatus = 'PENDING_RECEIVER_CONFIRMATION';
             locId = pass.to_location_id;
@@ -1486,11 +1535,11 @@ const confirmReceiverByToken = async (req, res) => {
                 `UPDATE material_gate_passes SET 
                     status = ?, 
                     receiver_confirmed_at = NOW(), 
-                    receiver_accepted_at = ?,
+                    receiver_accepted_at = NOW(),
                     receiver_confirmed_by = ?, 
                     receiver_action_token = NULL
                  WHERE id = ?`,
-                [nextStatus, isRGP ? new Date() : null, pass.receiver_id || 0, passId]
+                [nextStatus, pass.receiver_id || 0, passId]
             );
         }
 
@@ -1530,6 +1579,45 @@ const confirmReceiverByToken = async (req, res) => {
                     </a>
                 </div>
             `;
+        }
+        
+        // --- 7. EXTERNAL RGP: Notify SG1 that they can now START RETURN ---
+        if (!isEmailActionToken && pass.movement_type === 'external' && pass.pass_type === 'RGP') {
+            setTimeout(async () => {
+                try {
+                    const { sendExternalRGPSG1ReturnEmail } = require('../utils/mail.util');
+                    const fullPass = await fetchFullPassData(passId);
+                    const loginUrl = process.env.FRONTEND_URL || 'http://localhost:8000';
+                    const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
+                    
+                    const [sg1] = await pool.query("SELECT email, name FROM users WHERE role = 'security' AND location_id = ? AND status = 'active' LIMIT 1", [pass.from_location_id]);
+                    if (sg1.length > 0 && sg1[0].email) {
+                        // Generate a fresh token for SG1 to "Start Return" if they click email link
+                        const returnToken = require('crypto').randomBytes(32).toString('hex');
+                        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+                        
+                        await pool.query(
+                            'INSERT INTO email_action_tokens (pass_id, token, action_type, expires_at) VALUES (?, ?, ?, ?)',
+                            [passId, returnToken, 'SECURITY_APPROVAL', expiresAt]
+                        );
+
+                        const returnStartUrl = `${baseUrl}/api/material/security/approve?token=${returnToken}&passId=${passId}`;
+                        
+                        await sendExternalRGPSG1ReturnEmail(sg1[0].email, {
+                            securityName: sg1[0].name,
+                            dcNumber: fullPass.dc_number,
+                            driverName: fullPass.driver_name,
+                            vehicleNumber: fullPass.vehicle_number,
+                            origin: fullPass.from_location_name,
+                            externalAddress: fullPass.external_address,
+                            returnStartUrl,
+                            loginUrl
+                        });
+                    }
+                } catch (err) {
+                    console.error('[External RGP] Post-confirm SG1 notify error:', err);
+                }
+            }, 500);
         }
             
         return renderHtmlResponse(true, successTitle, successMsg, extraHtml);
@@ -1571,6 +1659,8 @@ const rejectSecurityInternal = async (passId, rawReason, securityUser) => {
             stage = 'RETURN_SECURITY_DESTINATION';
         } else if (currentStatus === 'PENDING_RETURN_SECURITY_ORIGIN') {
             stage = 'RETURN_SECURITY_ORIGIN';
+        } else if (currentStatus === 'DISPATCHED' && pass[0].movement_type === 'external' && pass[0].pass_type === 'RGP') {
+            stage = 'EXTERNAL_RGP_RETURN_DISPATCH';
         } else {
             throw new Error(`Cannot reject at current stage: ${currentStatus}`);
         }
@@ -1698,11 +1788,12 @@ const getPassesByStatus = async (req, res) => {
                 p.receiver_phone,
                 p.rejected_at, p.rejected_reason, p.rejected_by,
                 p.vehicle_number, p.return_vehicle_number,
+                p.return_driver_name, p.return_driver_phone,
                 p.approved_by_role,
-                u.name as created_by_name,
+                u.name as submitted_by_name,
                 ru.name as rejected_by_name, ru.role as rejected_by_role,
                 fl.location_name as from_name,
-                tl.location_name as to_name,
+                COALESCE(tl.location_name, CONCAT('External: ', p.external_address)) as to_name,
                 (SELECT manager_id FROM user_managers WHERE user_id = p.created_by LIMIT 1) as manager_id
             FROM material_gate_passes p
             LEFT JOIN users u ON p.created_by = u.id
@@ -1773,13 +1864,19 @@ const getPassesByStatus = async (req, res) => {
                     currentStage = 'Return: Waiting for Destination Security Dispatch';
                     break;
                 case 'PENDING_RETURN_SECURITY_ORIGIN':
-                    currentStage = 'Return: Waiting for Origin Security Receipt';
+                case 'PENDING_RETURN_SG':
+                    currentStage = 'Return: Waiting for Security Receipt';
                     break;
                 case 'PENDING_RETURN_RECEIPT':
-                    currentStage = 'Return: Waiting for Final Receipt Confirmation';
+                case 'PENDING_RETURN_RECEIVER_CONFIRMATION':
+                case 'PENDING_CREATOR_CONFIRMATION':
+                    currentStage = 'Return: Waiting for Final Confirmation';
+                    break;
+                case 'DISPATCHED':
+                    currentStage = 'Material Dispatched';
                     break;
                 case 'COMPLETED':
-                    currentStage = 'Material Received & Completed';
+                    currentStage = 'Completed';
                     break;
                 case 'REJECTED':
                 case 'REJECTED_BY_RECEIVER':
@@ -1804,8 +1901,7 @@ const getPassesByStatus = async (req, res) => {
                 current_stage: currentStage,
                 pass_type: p.pass_type,
                 movement_type: p.movement_type,
-                created_by_name: p.created_by_name,
-                submitted_by_name: p.created_by_name,
+                submitted_by_name: p.submitted_by_name,
                 created_at: p.created_at,
                 dispatched_at: p.dispatched_at,
                 received_at: p.received_at,
@@ -1837,13 +1933,15 @@ const getHistoryPasses = async (req, res) => {
             SELECT p.id, p.dc_number, p.created_at, p.receiver_id, p.receiver_phone,
                 p.movement_type, p.pass_type, p.receiver_accepted_at, p.return_initiated_at,
                 fl.location_name AS from_name,
-                tl.location_name AS to_name,
-                u.name AS submitted_by,
+                COALESCE(tl.location_name, CONCAT('External: ', p.external_address)) as to_name,
+                u.name AS submitted_by_name,
                 p.from_location_id,
                 p.to_location_id,
                 p.created_by,
                 p.vehicle_number,
                 p.return_vehicle_number,
+                p.return_driver_name,
+                p.return_driver_phone,
                 p.approved_by_role,
                 p.approved_by_manager_id AS manager_id,
                 COALESCE(p.return_confirmed_at, p.security_destination_approved_at, p.rejected_at) AS completed_at,
@@ -1893,30 +1991,40 @@ const getHistoryPasses = async (req, res) => {
         
         const [passes] = await pool.query(finalQuery, params);
         
-        const result = passes.map(p => ({
-            id: p.id,
-            dc_number: p.dc_number,
-            manager_id: p.manager_id,
-            receiver_id: p.receiver_id,
-            from_name: p.from_name,
-            to_name: p.to_name,
-            from_location_id: p.from_location_id,
-            to_location_id: p.to_location_id,
-            created_by: p.created_by,
-            submitted_by_id: p.created_by,
-            submitted_by: p.submitted_by,
-            submitted_by_name: p.submitted_by,
-            completed_at: p.completed_at,
-            created_at: p.created_at,
-            movement_type: p.movement_type,
-            pass_type: p.pass_type,
-            vehicle_number: p.vehicle_number,
-            return_vehicle_number: p.return_vehicle_number,
-            receiver_phone: p.receiver_phone,
-            status: p.status,
-            external_address: p.external_address,
-            updated_at: p.updated_at
-        }));
+        const result = passes.map(p => {
+            const mt = p.movement_type === 'internal' ? 'Internal' : 'External';
+            const pt = p.pass_type === 'RGP' ? 'RGP' : 'NRGP';
+            const category_name = `${mt} ${pt}`;
+            
+            return {
+                id: p.id,
+                dc_number: p.dc_number,
+                manager_id: p.manager_id,
+                receiver_id: p.receiver_id,
+                from_name: p.from_name,
+                to_name: p.to_name,
+                origin: p.from_name,
+                destination: p.to_name,
+                from_location_id: p.from_location_id,
+                to_location_id: p.to_location_id,
+                created_by: p.created_by,
+                submitted_by_id: p.created_by,
+                submitted_by: p.submitted_by_name,
+                submitted_by_name: p.submitted_by_name,
+                completed_at: p.completed_at,
+                created_at: p.created_at,
+                movement_type: p.movement_type,
+                pass_type: p.pass_type,
+                category_name: category_name,
+                category: category_name,
+                vehicle_number: p.vehicle_number,
+                return_vehicle_number: p.return_vehicle_number,
+                receiver_phone: p.receiver_phone,
+                status: p.status,
+                external_address: p.external_address,
+                updated_at: p.updated_at
+            };
+        });
         
         return sendResponse(res, 200, true, 'History passes fetched', result);
     } catch (err) {
@@ -1925,17 +2033,19 @@ const getHistoryPasses = async (req, res) => {
     }
 };
 
-// External NRGP Complete (SG1 assigns driver → COMPLETED)
+// External NRGP Complete (SG1 assigns driver → COMPLETED/DISPATCHED)
 const markExternalNRGPComplete = async (req, res) => {
-    const { passId, vehicle_number, driver_name, driver_phone } = req.body;
+    const { passId, vehicle_number, driver_name, driver_phone, receiver_name, receiver_phone } = req.body;
     const securityUser = req.user;
 
     try {
-        await markExternalSG1CompleteInternal(passId, vehicle_number, driver_name, driver_phone, securityUser);
-        return sendResponse(res, 200, true, 'External pass completed successfully. Driver details saved.', {
+        await markExternalSG1CompleteInternal(passId, vehicle_number, driver_name, driver_phone, securityUser, receiver_name, receiver_phone);
+        return sendResponse(res, 200, true, 'External pass processed successfully. Details saved.', {
             driver_name: (driver_name || '').trim(),
             driver_phone: (driver_phone || '').trim(),
-            vehicle_number: (vehicle_number || '').trim()
+            vehicle_number: (vehicle_number || '').trim(),
+            receiver_name: (receiver_name || '').trim(),
+            receiver_phone: (receiver_phone || '').trim()
         });
     } catch (err) {
         console.error('[External SG1] Complete error:', err);
@@ -1944,7 +2054,7 @@ const markExternalNRGPComplete = async (req, res) => {
 };
 
 // Internal Helper to unify SG1 External Completion (UI and Email flows)
-const markExternalSG1CompleteInternal = async (passId, vehicle_number, driver_name, driver_phone, securityUser) => {
+const markExternalSG1CompleteInternal = async (passId, vehicle_number, driver_name, driver_phone, securityUser, receiver_name = null, receiver_phone = null) => {
     // --- 1. Input Validation ---
     const cleanDriverName = (driver_name || '').trim();
     const cleanDriverPhone = (driver_phone || '').trim();
@@ -2000,20 +2110,25 @@ const markExternalSG1CompleteInternal = async (passId, vehicle_number, driver_na
         }
 
         const currentStatus = pass.status;
-        const nextStatus = 'COMPLETED';
         const cleanVehicleNo = (vehicle_number || '').trim() || null;
 
+        // ==============================================================
+        // BRANCH: External RGP → PENDING_RETURN_SG (Strict Flow)
+        // ==============================================================
+        const isExternalRGP = pass.movement_type === 'external' && pass.pass_type === 'RGP';
+        const nextStatus = isExternalRGP ? 'PENDING_RETURN_SG' : 'COMPLETED';
+
+        const updateFields = isExternalRGP
+            ? `status = ?, dispatched_by = ?, security_origin_approved_at = NOW(), vehicle_number = ?, driver_name = ?, driver_phone = ?, dispatched_at = NOW(), receiver_name = COALESCE(?, receiver_name), receiver_phone = COALESCE(?, receiver_phone)`
+            : `status = ?, dispatched_by = ?, security_origin_approved_at = NOW(), vehicle_number = ?, driver_name = ?, driver_phone = ?, completed_at = NOW(), receiver_name = COALESCE(?, receiver_name), receiver_phone = COALESCE(?, receiver_phone)`;
+
+        const cleanRecName = (receiver_name || '').trim() || null;
+        const cleanRecPhone = (receiver_phone || '').trim() || null;
+        const queryParams = [nextStatus, securityUser.id, cleanVehicleNo, cleanDriverName, cleanDriverPhone, cleanRecName, cleanRecPhone, passId];
+
         const [result] = await connection.query(
-            `UPDATE material_gate_passes 
-             SET status = ?,
-                 dispatched_by = ?,
-                 security_origin_approved_at = NOW(),
-                 vehicle_number = ?,
-                 driver_name = ?,
-                 driver_phone = ?,
-                 completed_at = NOW()
-             WHERE id = ? AND status = 'PENDING_SECURITY_ORIGIN'`,
-            [nextStatus, securityUser.id, cleanVehicleNo, cleanDriverName, cleanDriverPhone, passId]
+            `UPDATE material_gate_passes SET ${updateFields} WHERE id = ? AND status = 'PENDING_SECURITY_ORIGIN'`,
+            queryParams
         );
 
         if (result.affectedRows === 0) {
@@ -2028,39 +2143,59 @@ const markExternalSG1CompleteInternal = async (passId, vehicle_number, driver_na
 
         // --- 6. Log to tracking ---
         await logTracking(
-            connection, passId, 'ORIGIN_SECURITY', 'COMPLETED',
+            connection, passId, 'ORIGIN_SECURITY',
+            isExternalRGP ? 'DISPATCHED (PENDING RETURN)' : 'COMPLETED',
             currentStatus, nextStatus,
             securityUser.id, securityUser.location_id, 'security'
         );
 
         await connection.commit();
 
-        // --- 7. Send completion email (async, post-commit) ---
-        const triggerCompletionEmail = async () => {
+        // --- 7. Send emails (async, post-commit) ---
+        setTimeout(async () => {
             try {
                 const fullPass = await fetchFullPassData(passId);
                 if (!fullPass) return;
+                const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
+                const loginUrl = process.env.FRONTEND_URL || 'http://localhost:8000';
 
-                const { sendExternalNRGPCompletionEmail } = require('../utils/mail.util');
-                const creatorEmail = fullPass.created_by_email;
-                if (creatorEmail) {
-                    await sendExternalNRGPCompletionEmail(creatorEmail, {
-                        recipientName: fullPass.created_by_name,
-                        dcNumber: fullPass.dc_number,
-                        driverName: cleanDriverName,
-                        driverPhone: cleanDriverPhone,
-                        vehicleNumber: cleanVehicleNo, // Now passed correctly
-                        origin: fullPass.from_location_name,
-                        externalAddress: fullPass.external_address,
-                        completedAt: new Date().toISOString(),
-                        loginUrl: process.env.FRONTEND_URL || 'http://localhost:8000'
-                    });
+                if (isExternalRGP) {
+                    // Email 1: Notify creator that material was dispatched
+                    const { sendExternalRGPDispatchedEmail } = require('../utils/mail.util');
+                    if (fullPass.created_by_email) {
+                        await sendExternalRGPDispatchedEmail(fullPass.created_by_email, {
+                            recipientName: fullPass.creator_name,
+                            dcNumber: fullPass.dc_number,
+                            driverName: cleanDriverName,
+                            driverPhone: cleanDriverPhone,
+                            vehicleNumber: cleanVehicleNo,
+                            origin: fullPass.from_location_name,
+                            externalAddress: fullPass.external_address,
+                            dispatchedAt: new Date(),
+                            loginUrl
+                        });
+                    }
+                } else {
+                    // External NRGP: existing completion email
+                    const { sendExternalNRGPCompletionEmail } = require('../utils/mail.util');
+                    if (fullPass.created_by_email) {
+                        await sendExternalNRGPCompletionEmail(fullPass.created_by_email, {
+                            recipientName: fullPass.created_by_name,
+                            dcNumber: fullPass.dc_number,
+                            driverName: cleanDriverName,
+                            driverPhone: cleanDriverPhone,
+                            vehicleNumber: cleanVehicleNo,
+                            origin: fullPass.from_location_name,
+                            externalAddress: fullPass.external_address,
+                            completedAt: new Date().toISOString(),
+                            loginUrl
+                        });
+                    }
                 }
             } catch (err) {
-                console.error('[External SG1] Completion email error:', err);
+                console.error('[External SG1] Post-dispatch email error:', err);
             }
-        };
-        setTimeout(triggerCompletionEmail, 500);
+        }, 500);
 
     } catch (err) {
         await connection.rollback();
@@ -2069,6 +2204,325 @@ const markExternalSG1CompleteInternal = async (passId, vehicle_number, driver_na
         connection.release();
     }
 };
+
+// =============================================
+// EXTERNAL RGP RETURN FLOW FUNCTIONS
+// =============================================
+
+// EXT-RGP-R1: SG1 starts the return (DISPATCHED → PENDING_RETURN_SECURITY_ORIGIN)
+const markExternalRGPReturnStart = async (req, res) => {
+    const { passId, return_vehicle_number, return_driver_name, return_driver_phone } = req.body;
+    const securityUser = req.user;
+    try {
+        await markExternalRGPReturnStartInternal(passId, (return_vehicle_number || '').trim(), (return_driver_name || '').trim(), (return_driver_phone || '').trim(), securityUser);
+        return sendResponse(res, 200, true, 'Item marked as returned. Creator will be notified to verify receipt.');
+    } catch (err) {
+        console.error('[External RGP] Return Start error:', err);
+        return sendResponse(res, 400, false, err.message || 'Return start failed');
+    }
+};
+const markExternalRGPReturnStartInternal = async (passId, return_vehicle_number, return_driver_name, return_driver_phone, securityUser) => {
+    const cleanReturnVehicle = (return_vehicle_number || '').trim();
+    if (!cleanReturnVehicle) throw new Error('Return vehicle number is required');
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const [passRows] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [passId]);
+        if (!passRows.length) throw new Error('Pass not found');
+        const pass = passRows[0];
+
+        // Fallback to outward driver info if not provided
+        const cleanReturnDriverName = (return_driver_name || pass.driver_name || 'N/A').trim();
+        const cleanReturnDriverPhone = (return_driver_phone || pass.driver_phone || '0000000000').trim();
+
+        // Strict type check
+        if (pass.movement_type !== 'external' || pass.pass_type !== 'RGP') {
+            throw new Error('This action is only allowed for External RGP passes');
+        }
+        if (pass.status !== 'PENDING_RETURN_SG') {
+            throw new Error(`Pass is not in PENDING_RETURN_SG stage (current: ${pass.status})`);
+        }
+
+        // STRICT CHECK: SAME USER ONLY
+        if (securityUser.id !== 0 && pass.dispatched_by && parseInt(pass.dispatched_by) !== parseInt(securityUser.id)) {
+            const [dispUser] = await connection.query('SELECT name FROM users WHERE id = ?', [pass.dispatched_by]);
+            const dispName = dispUser.length > 0 ? dispUser[0].name : 'the original dispatcher';
+            throw new Error(`Unauthorized: Only ${dispName} who dispatched this material can receive the return.`);
+        }
+
+        if (securityUser.id !== 0 && parseInt(securityUser.location_id) !== parseInt(pass.from_location_id)) {
+            throw new Error('Unauthorized: You are not at the origin location');
+        }
+
+        const currentStatus = pass.status;
+        const nextStatus = 'PENDING_CREATOR_CONFIRMATION';
+
+        // Generate token for Creator to confirm return receipt (Directly after SG1 starts return)
+        const confirmToken = require('crypto').randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+        const [result] = await connection.query(
+            `UPDATE material_gate_passes SET 
+                status = ?, 
+                return_initiated_at = NOW(), 
+                return_vehicle_number = ?,
+                return_driver_name = ?,
+                return_driver_phone = ?,
+                return_dispatched_by = ?,
+                return_dispatched_at = NOW()
+             WHERE id = ? AND status = 'PENDING_RETURN_SG'`,
+            [nextStatus, cleanReturnVehicle, cleanReturnDriverName, cleanReturnDriverPhone, securityUser.id, passId]
+        );
+        if (result.affectedRows === 0) throw new Error('Update failed (Race Condition)');
+
+        // Invalidate old tokens and insert new creator confirm token
+        await connection.query('UPDATE email_action_tokens SET used = 1 WHERE pass_id = ? AND used = 0', [passId]);
+        await connection.query(
+            'INSERT INTO email_action_tokens (pass_id, token, action_type, expires_at) VALUES (?, ?, ?, ?)',
+            [passId, confirmToken, 'EXTERNAL_RGP_CREATOR_CONFIRM', expiresAt]
+        );
+
+        await logTracking(connection, passId, 'EXTERNAL_RGP_RETURN_RECEIPT', 'RECEIVED_BY_SG', currentStatus, nextStatus, securityUser.id, securityUser.location_id, 'security');
+        await connection.commit();
+
+        // Notify Creator to confirm final receipt (SKIP intermediate SG1 step)
+        setTimeout(async () => {
+            try {
+                const { sendExternalRGPCreatorReturnConfirmEmail } = require('../utils/mail.util');
+                const fullPass = await fetchFullPassData(passId);
+                const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
+                const confirmUrl = `${baseUrl}/api/material/confirm-external-rgp-return?token=${confirmToken}&passId=${passId}&action=approve`;
+                const rejectUrl = `${baseUrl}/api/material/confirm-external-rgp-return?token=${confirmToken}&passId=${passId}&action=reject`;
+                const [creator] = await pool.query('SELECT email, name FROM users WHERE id = ?', [pass.created_by]);
+                if (creator.length > 0 && creator[0].email) {
+                    await sendExternalRGPCreatorReturnConfirmEmail(creator[0].email, {
+                        recipientName: creator[0].name,
+                        dcNumber: fullPass.dc_number,
+                        returnVehicleNumber: cleanReturnVehicle,
+                        returnDriverName: cleanReturnDriverName,
+                        returnDriverPhone: cleanReturnDriverPhone,
+                        origin: fullPass.from_location_name,
+                        externalAddress: fullPass.external_address,
+                        confirmUrl,
+                        rejectUrl,
+                        loginUrl: process.env.FRONTEND_URL || 'http://localhost:8000'
+                    });
+                }
+            } catch (err) {
+                console.error('[External RGP] Return Start email error:', err);
+            }
+        }, 500);
+
+        return true;
+    } catch (err) {
+        await connection.rollback();
+        throw err;
+    } finally {
+        connection.release();
+    }
+};
+
+// EXT-RGP-R2: SG1 confirms return at gate (PENDING_RETURN_SECURITY_ORIGIN → PENDING_RETURN_RECEIVER_CONFIRMATION)
+const markExternalRGPReturnConfirmed = async (req, res) => {
+    const { passId, return_vehicle_number, return_driver_name, return_driver_phone } = req.body;
+    const securityUser = req.user;
+    try {
+        await markExternalRGPReturnConfirmedInternal(passId, securityUser, return_vehicle_number, return_driver_name, return_driver_phone);
+        return sendResponse(res, 200, true, 'Return confirmed. Creator will be notified to verify receipt.');
+    } catch (err) {
+        console.error('[External RGP] Return Confirm error:', err);
+        return sendResponse(res, 400, false, err.message || 'Return confirmation failed');
+    }
+};
+
+const markExternalRGPReturnConfirmedInternal = async (passId, securityUser, return_vehicle_number = null, return_driver_name = null, return_driver_phone = null) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const [passRows] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [passId]);
+        if (!passRows.length) throw new Error('Pass not found');
+        const pass = passRows[0];
+
+        if (pass.movement_type !== 'external' || pass.pass_type !== 'RGP') {
+            throw new Error('This action is only allowed for External RGP passes');
+        }
+        if (pass.status !== 'PENDING_RETURN_SECURITY_ORIGIN' && pass.status !== 'PENDING_RETURN_SG') {
+            throw new Error(`Pass is not in a valid return stage (current: ${pass.status})`);
+        }
+        if (securityUser.id !== 0 && parseInt(securityUser.location_id) !== parseInt(pass.from_location_id)) {
+            throw new Error('Unauthorized: You are not at the origin location');
+        }
+
+        const currentStatus = pass.status;
+        const nextStatus = 'PENDING_RETURN_RECEIVER_CONFIRMATION';
+        const confirmToken = require('crypto').randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+        const [result] = await connection.query(
+            `UPDATE material_gate_passes SET 
+                status = ?, 
+                return_received_by = ?, 
+                return_received_at = NOW(),
+                return_vehicle_number = ?,
+                return_driver_name = ?,
+                return_driver_phone = ?
+             WHERE id = ? AND (status = 'PENDING_RETURN_SECURITY_ORIGIN' OR status = 'PENDING_RETURN_SG')`,
+            [nextStatus, securityUser.id, return_vehicle_number, return_driver_name, return_driver_phone, passId]
+        );
+        if (result.affectedRows === 0) throw new Error('Update failed (Race Condition)');
+
+        await connection.query('UPDATE email_action_tokens SET used = 1 WHERE pass_id = ? AND used = 0', [passId]);
+        await connection.query(
+            'INSERT INTO email_action_tokens (pass_id, token, action_type, expires_at) VALUES (?, ?, ?, ?)',
+            [passId, confirmToken, 'EXTERNAL_RGP_CREATOR_CONFIRM', expiresAt]
+        );
+
+        await logTracking(connection, passId, 'EXTERNAL_RGP_RETURN_CONFIRM', 'PENDING_RETURN_RECEIVER_CONFIRMATION', currentStatus, nextStatus, securityUser.id, securityUser.location_id, 'security');
+        await connection.commit();
+
+        // Notify Creator to confirm final receipt
+        setTimeout(async () => {
+            try {
+                const { sendExternalRGPCreatorReturnConfirmEmail } = require('../utils/mail.util');
+                const fullPass = await fetchFullPassData(passId);
+                const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
+                const confirmUrl = `${baseUrl}/api/material/confirm-external-rgp-return?token=${confirmToken}&passId=${passId}&confirmed=true`;
+                const [creator] = await pool.query('SELECT email, name FROM users WHERE id = ?', [pass.created_by]);
+                if (creator.length > 0 && creator[0].email) {
+                    await sendExternalRGPCreatorReturnConfirmEmail(creator[0].email, {
+                        recipientName: creator[0].name,
+                        dcNumber: fullPass.dc_number,
+                        returnVehicleNumber: return_vehicle_number || fullPass.return_vehicle_number || pass.return_vehicle_number,
+                        returnDriverName: return_driver_name || fullPass.return_driver_name || pass.return_driver_name,
+                        returnDriverPhone: return_driver_phone || fullPass.return_driver_phone || pass.return_driver_phone,
+                        origin: fullPass.from_location_name,
+                        externalAddress: fullPass.external_address,
+                        confirmUrl,
+                        loginUrl: process.env.FRONTEND_URL || 'http://localhost:8000'
+                    });
+                }
+            } catch (err) {
+                console.error('[External RGP] Return Confirm email error:', err);
+            }
+        }, 500);
+
+        return true;
+    } catch (err) {
+        await connection.rollback();
+        throw err;
+    } finally {
+        connection.release();
+    }
+};
+
+// EXT-RGP-R3: Creator confirms receipt (PENDING_RETURN_RECEIVER_CONFIRMATION → COMPLETED)
+const confirmExternalRGPReturnByCreator = async (req, res) => {
+    const { token, passId, confirmed } = req.query;
+    const isPost = req.method === 'POST';
+    const passIdVal = isPost ? req.body?.passId : passId;
+
+    const renderHtmlResponse = (success, title, msg, extraHtml = '') =>
+        res.send(renderHtmlResponseGlobal(success, title, msg, extraHtml));
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Validate Pass
+        const [passRows] = await connection.query('SELECT * FROM material_gate_passes WHERE id = ? FOR UPDATE', [passIdVal]);
+        if (!passRows.length) {
+            if (isPost) return sendResponse(res, 404, false, 'Pass not found');
+            throw new Error('Pass not found');
+        }
+        const pass = passRows[0];
+
+        if (pass.movement_type !== 'external' || pass.pass_type !== 'RGP') {
+            if (isPost) return sendResponse(res, 400, false, 'Not an External RGP pass');
+            throw new Error('Not an External RGP pass');
+        }
+        if (pass.status !== 'PENDING_CREATOR_CONFIRMATION' && pass.status !== 'PENDING_RETURN_RECEIVER_CONFIRMATION') {
+            if (isPost) return sendResponse(res, 400, false, 'Pass is already processed');
+            throw new Error('Pass is already processed');
+        }
+
+        // 2. Action Logic
+        let action = 'approve';
+        let actorId = pass.created_by;
+        let isSystemToken = false;
+
+        if (isPost) {
+            // Portal Action
+            if (parseInt(pass.created_by) !== parseInt(req.user.id) && req.user.role !== 'admin') {
+                return sendResponse(res, 403, false, 'Unauthorized');
+            }
+            action = req.body?.action || 'approve';
+            actorId = req.user.id;
+        } else {
+            // Token Action
+            if (!token) throw new Error('Missing token');
+            const [emailTokens] = await connection.query(
+                'SELECT * FROM email_action_tokens WHERE pass_id = ? AND token = ? AND action_type = ? FOR UPDATE',
+                [passIdVal, token, 'EXTERNAL_RGP_CREATOR_CONFIRM']
+            );
+            if (!emailTokens.length || emailTokens[0].used) throw new Error('Invalid or expired link');
+            action = req.query.action || 'approve';
+            isSystemToken = true;
+        }
+
+        // 3. Update Database
+        if (action === 'reject') {
+            const reason = isPost ? req.body?.rejected_reason : req.query?.rejected_reason;
+            if (!reason || !reason.trim()) {
+                if (isPost) {
+                    return sendResponse(res, 400, false, 'Rejection remark is required');
+                } else {
+                    const fullPass = await fetchFullPassData(passIdVal);
+                    return res.send(renderRejectionForm(token, passIdVal, 'reject', fullPass));
+                }
+            }
+            const cleanReason = reason.trim();
+            await connection.query(
+                `UPDATE material_gate_passes SET status = 'PENDING_RETURN_SG', rejected_by = ?, rejected_role = 'user', rejected_at = NOW(), rejected_reason = ? WHERE id = ?`,
+                [actorId, cleanReason, passIdVal]
+            );
+            await logTracking(connection, passIdVal, 'EXTERNAL_RGP_CREATOR_REJECT', 'REJECTED_TO_SG', pass.status, 'PENDING_RETURN_SG', actorId, pass.from_location_id, 'user', cleanReason);
+        } else {
+            await connection.query(
+                `UPDATE material_gate_passes SET status = 'COMPLETED', return_confirmed_at = NOW(), return_confirmed_by = ?, completed_at = NOW() WHERE id = ?`,
+                [actorId, passIdVal]
+            );
+            await logTracking(connection, passIdVal, 'EXTERNAL_RGP_CREATOR_CONFIRM', 'COMPLETED', 'PENDING_RETURN_RECEIVER_CONFIRMATION', 'COMPLETED', actorId, pass.from_location_id, 'user');
+        }
+
+        // 4. Cleanup
+        await connection.query('UPDATE email_action_tokens SET used = 1 WHERE pass_id = ? AND used = 0', [passIdVal]);
+        await connection.commit();
+
+        // 5. Response
+        if (isPost) {
+            const msg = action === 'reject' ? 'Return rejected successfully' : 'Return confirmed successfully';
+            return sendResponse(res, 200, true, msg);
+        } else {
+            const title = action === 'reject' ? 'Return Rejected' : 'Return Confirmed';
+            const msg = action === 'reject' 
+                ? 'You have rejected the return receipt. Pass status updated to REJECTED.'
+                : 'Thank you! You have successfully confirmed receipt of the returned materials.';
+            return renderHtmlResponse(true, title, msg);
+        }
+
+    } catch (err) {
+        await connection.rollback();
+        if (isPost) {
+            return sendResponse(res, 400, false, err.message);
+        } else {
+            return renderHtmlResponse(false, 'Action Failed', err.message);
+        }
+    } finally {
+        connection.release();
+    }
+};
+
 
 const getPassTracking = async (req, res) => {
     const { dc } = req.query;
@@ -2083,12 +2537,18 @@ const getPassTracking = async (req, res) => {
                    fl.location_name as from_name, 
                    tl.location_name as to_name,
                    u.name as creator_name,
-                   ur.name as receiver_name
+                   ur.name as system_receiver_name,
+                   mu.name as approved_by_name,
+                   rru.name as return_received_by_name,
+                   rcu.name as return_confirmed_by_name
             FROM material_gate_passes p
             LEFT JOIN locations fl ON p.from_location_id = fl.id
             LEFT JOIN locations tl ON p.to_location_id = tl.id
             LEFT JOIN users u ON p.created_by = u.id
             LEFT JOIN users ur ON p.receiver_id = ur.id
+            LEFT JOIN users mu ON p.approved_by_manager_id = mu.id
+            LEFT JOIN users rru ON p.return_received_by = rru.id
+            LEFT JOIN users rcu ON p.return_confirmed_by = rcu.id
             WHERE LOWER(p.dc_number) = LOWER(?)
         `, [dc.trim()]);
 
@@ -2134,7 +2594,10 @@ const getPassTracking = async (req, res) => {
             current_status: (pass.status || '').toUpperCase(),
             pass_type: pass.pass_type,
             movement_type: pass.movement_type?.toLowerCase(),
-            receiver_name: pass.receiver_name,
+            receiver_name: pass.system_receiver_name || pass.receiver_name,
+            receiver_phone: pass.receiver_phone,
+            receiver_email: pass.receiver_email,
+            receiver_address: pass.external_address,
             receiver_confirmed_at: pass.receiver_confirmed_at,
             current_stage: (() => {
                 const s = (pass.status || '').toUpperCase();
@@ -2167,10 +2630,15 @@ const getPassTracking = async (req, res) => {
             return_vehicle_number: pass.return_vehicle_number,
             approved_by_role: pass.approved_by_role,
             approved_by_name: pass.approved_by_name,
-            approved_at: pass.approved_by_manager_at,
+            approved_at: pass.approved_by_manager_at || pass.approved_at,
             return_approved_by_role: pass.return_approved_by_role,
             return_approved_by_name: pass.return_approved_by_name,
             return_approved_at: pass.return_approved_manager_at,
+            return_received_by_name: pass.return_received_by_name,
+            return_received_at: pass.return_received_at,
+            return_confirmed_by_name: pass.return_confirmed_by_name,
+            return_confirmed_at: pass.return_confirmed_at,
+            completed_at: pass.completed_at,
             receiver_accepted_at: pass.receiver_accepted_at
         });
     } catch (err) {
@@ -2208,17 +2676,20 @@ const confirmReceiverPortal = async (req, res) => {
         }
 
         const isRGP = pass[0].pass_type === 'RGP';
-        const nextStatus = isRGP ? (pass[0].status === 'PENDING_RECEIVER' ? 'PENDING_RECEIVER' : 'PENDING_RECEIVER_CONFIRMATION') : 'COMPLETED';
+        const isExternalRGP = pass[0].movement_type === 'external' && isRGP;
+
+        // External RGP advances to DISPATCHED after receiver confirmation
+        const nextStatus = isExternalRGP ? 'PENDING_RETURN_SG' : (isRGP ? (pass[0].status === 'PENDING_RECEIVER' ? 'PENDING_RECEIVER' : 'PENDING_RECEIVER_CONFIRMATION') : 'COMPLETED');
 
         await connection.query(
             `UPDATE material_gate_passes SET 
                 status = ?, 
                 receiver_confirmed_at = NOW(), 
-                receiver_accepted_at = ?,
+                receiver_accepted_at = NOW(),
                 receiver_confirmed_by = ?, 
                 receiver_action_token = NULL 
              WHERE id = ?`,
-            [nextStatus, isRGP ? new Date() : null, receiverUserId, passId]
+            [nextStatus, receiverUserId, passId]
         );
 
         // Universal Sync: Mark all tokens for THIS STAGE as used
@@ -2230,6 +2701,43 @@ const confirmReceiverPortal = async (req, res) => {
         await logTracking(connection, passId, 'RECEIVER_CONFIRMATION', 'COMPLETED', 'PENDING_RECEIVER_CONFIRMATION', nextStatus, receiverUserId, pass[0].to_location_id, 'receiver');
 
         await connection.commit();
+
+        // Notify SG1 for Start Return journey (External RGP)
+        if (isExternalRGP) {
+            setTimeout(async () => {
+                try {
+                    const { sendExternalRGPSG1ReturnEmail } = require('../utils/mail.util');
+                    const fullPass = await fetchFullPassData(passId);
+                    const baseUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
+                    
+                    const returnToken = require('crypto').randomBytes(32).toString('hex');
+                    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+                    
+                    await pool.query(
+                        'INSERT INTO email_action_tokens (pass_id, token, action_type, expires_at) VALUES (?, ?, ?, ?)',
+                        [passId, returnToken, 'SECURITY_APPROVAL', expiresAt]
+                    );
+
+                    const returnStartUrl = `${baseUrl}/api/material/security/approve?token=${returnToken}&passId=${passId}`;
+                    
+                    const [sg1] = await pool.query("SELECT email, name FROM users WHERE role = 'security' AND location_id = ? AND status = 'active' LIMIT 1", [pass[0].from_location_id]);
+                    
+                    if (sg1.length > 0 && sg1[0].email) {
+                        await sendExternalRGPSG1ReturnEmail(sg1[0].email, {
+                            recipientName: sg1[0].name,
+                            dcNumber: fullPass.dc_number,
+                            origin: fullPass.from_location_name,
+                            externalAddress: fullPass.external_address,
+                            returnStartUrl,
+                            loginUrl: process.env.FRONTEND_URL || 'http://localhost:8000'
+                        });
+                    }
+                } catch (err) {
+                    console.error('[External RGP] Receiver Confirm (Portal) SG1 email error:', err);
+                }
+            }, 500);
+        }
+
         return sendResponse(res, 200, true, isRGP ? 'Receipt accepted. You can now initiate the return flow.' : 'Receipt successfully confirmed');
     } catch (err) {
         await connection.rollback();
@@ -2475,8 +2983,8 @@ const initiateReturn = async (req, res) => {
 // R2. Mark Return Dispatched (SG2 - Destination Security dispatches materials back to origin)
 const markReturnDispatched = async (req, res) => {
     try {
-        const { passId, vehicle_number } = req.body;
-        await markReturnDispatchedInternal(passId, vehicle_number, req.user);
+        const { passId, vehicle_number, driver_name, driver_phone } = req.body;
+        await markReturnDispatchedInternal(passId, vehicle_number, req.user, driver_name, driver_phone);
         return sendResponse(res, 200, true, 'Materials dispatched back to origin successfully');
     } catch (err) {
         console.error('markReturnDispatched error:', err);
@@ -2484,7 +2992,7 @@ const markReturnDispatched = async (req, res) => {
     }
 };
 
-const markReturnDispatchedInternal = async (passId, vehicle_number, securityUser) => {
+const markReturnDispatchedInternal = async (passId, vehicle_number, securityUser, driver_name = null, driver_phone = null) => {
     if (!vehicle_number || !vehicle_number.trim()) {
         throw new Error('Vehicle number is required for return dispatch');
     }
@@ -2511,9 +3019,9 @@ const markReturnDispatchedInternal = async (passId, vehicle_number, securityUser
 
         const [result] = await connection.query(
             `UPDATE material_gate_passes 
-             SET status = ?, return_dispatched_by = ?, return_dispatched_at = NOW(), return_vehicle_number = ?, security_action_token = ?, security_token_expires_at = ADDDATE(NOW(), INTERVAL 1 DAY)
+             SET status = ?, return_dispatched_by = ?, return_dispatched_at = NOW(), return_vehicle_number = ?, return_driver_name = ?, return_driver_phone = ?, security_action_token = ?, security_token_expires_at = ADDDATE(NOW(), INTERVAL 1 DAY)
              WHERE id = ? AND status = 'PENDING_RETURN_SECURITY_DESTINATION'`,
-            [nextStatus, securityUser.id, vehicle_number.trim(), nextToken, passId]
+            [nextStatus, securityUser.id, vehicle_number.trim(), (driver_name || '').trim(), (driver_phone || '').trim(), nextToken, passId]
         );
 
         if (result.affectedRows === 0) throw new Error('Update failed (Race Condition)');
@@ -2567,7 +3075,7 @@ const markReturnDispatchedInternal = async (passId, vehicle_number, securityUser
     }
 };
 
-const markReturnReceivedInternal = async (passId, securityUser) => {
+const markReturnReceivedInternal = async (passId, securityUser, vehicle_number = null, driver_name = null, driver_phone = null) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -2590,9 +3098,9 @@ const markReturnReceivedInternal = async (passId, securityUser) => {
 
         const [result] = await connection.query(
             `UPDATE material_gate_passes 
-             SET status = ?, return_received_by = ?, return_received_at = NOW(), security_action_token = NULL
+             SET status = ?, return_received_by = ?, return_received_at = NOW(), security_action_token = NULL, return_vehicle_number = COALESCE(?, return_vehicle_number), return_driver_name = COALESCE(?, return_driver_name), return_driver_phone = COALESCE(?, return_driver_phone)
              WHERE id = ? AND status = 'PENDING_RETURN_SECURITY_ORIGIN'`,
-            [nextStatus, securityUser.id, passId]
+            [nextStatus, securityUser.id, vehicle_number, driver_name, driver_phone, passId]
         );
 
         if (result.affectedRows === 0) throw new Error('Update failed (Race Condition)');
@@ -2648,11 +3156,11 @@ const markReturnReceivedInternal = async (passId, securityUser) => {
 
 // R3. Mark Return Received (SG1 - Origin Security receives the returned materials and completes the pass)
 const markReturnReceived = async (req, res) => {
-    const { passId } = req.body;
+    const { passId, vehicle_number, driver_name, driver_phone } = req.body;
     const securityUser = req.user;
 
     try {
-        await markReturnReceivedInternal(passId, securityUser);
+        await markReturnReceivedInternal(passId, securityUser, vehicle_number, driver_name, driver_phone);
         return sendResponse(res, 200, true, 'Return received by origin security. Awaiting original requester confirmation.');
     } catch (err) {
         console.error('markReturnReceived error:', err);
@@ -2976,5 +3484,9 @@ module.exports = {
     markReturnReceived,
     confirmReturnReceipt,
     getReturnInitiationForm,
-    markExternalNRGPComplete
+    markExternalNRGPComplete,
+    // External RGP Return Flow
+    markExternalRGPReturnStart,
+    markExternalRGPReturnConfirmed,
+    confirmExternalRGPReturnByCreator
 };

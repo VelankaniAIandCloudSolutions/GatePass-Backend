@@ -405,7 +405,12 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                         ${passData.movement_type === 'internal' 
                              ? `<div class="b">To: ${sanitizeHTML(passData.to_location_name)}</div>
                                 <div style="font-size: 0.9em; margin-top: 3px;">${sanitizeHTML(passData.to_address_detailed)}</div>`
-                             : `<div style="font-size: 0.9em;">${sanitizeHTML(passData.external_address)}</div>`
+                             : `
+                                <div class="b">To: ${sanitizeHTML(passData.receiver_name || '-')}</div>
+                                <div style="font-size: 0.9em; margin-top: 3px;">${sanitizeHTML(passData.external_address)}</div>
+                                ${passData.receiver_phone ? `<div style="font-size: 0.8em; margin-top: 2px;"><span class="b">Phone:</span> ${sanitizeHTML(passData.receiver_phone)}</div>` : ''}
+                                ${passData.receiver_email ? `<div style="font-size: 0.8em; margin-top: 2px;"><span class="b">Email:</span> ${sanitizeHTML(passData.receiver_email)}</div>` : ''}
+                               `
                          }
                          ${passData.destination_security_mobile ? `<div style="margin-top: 4px;"><span class="b">Contact:</span> ${sanitizeHTML(passData.destination_security_mobile)}</div>` : ''}
                     </div>
@@ -449,28 +454,31 @@ const generateChallanPDF = async (passData, isDraft = false) => {
                     </tfoot>
                 </table>
 
-                <div class="signature-section">
-                    ${isReturnFlowActive ? `
-                        <div style="padding: 6px; border-bottom: 1px solid #000; text-align: center; background: #f8fafc; font-weight: 800; font-size: ${baseFontSize * 0.9}px; color: #1e293b;">
-                            Forward journey completed. All 5 users have signed.
-                        </div>
-                    ` : ''}
-                    <div style="padding: 10px; font-size: 0.85em;">
-                        <span class="b">Remark:</span> ${passData.pass_type} basis. Not for sale. Value for insurance only.
+                    <div class="signature-section">
                         ${isReturnFlowActive ? `
-                            <div style="display: flex; margin-top: 8px; border-top: 1px solid #000; padding-top: 8px;">
-                                <div style="flex: 1;">
-                                    <div class="b" style="text-transform: uppercase;">RETURN INITIATOR (RECEIVER): ${sanitizeHTML(passData.receiver_user_name || passData.receiver_name || '-')}</div>
-                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.receiver_user_mobile || passData.receiver_mobile || passData.receiver_phone || '-')}</div>
-                                    ${receiverSigBase64 ? `<img src="data:image/png;base64,${receiverSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_initiated_at)}</div>` : '<div style="height: 30px;"></div>'}
-                                </div>
-                                <div style="flex: 1; text-align: right;">
-                                    <div class="b" style="text-transform: uppercase;">FINAL RECEIVER: ${sanitizeHTML(passData.return_confirmed_by_name || '-')}</div>
-                                    <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.created_user_mobile) || '-'}</div>
-                                    ${returnConfirmedSigBase64 ? `<img src="data:image/png;base64,${returnConfirmedSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_confirmed_at)}</div>` : '<div style="height: 30px;"></div>'}
-                                </div>
+                            <div style="padding: 6px; border-bottom: 1px solid #000; text-align: center; background: #f8fafc; font-weight: 800; font-size: ${baseFontSize * 0.9}px; color: #1e293b;">
+                                ${passData.movement_type === 'external' ? 'Forward Journey Completed' : 'Forward journey completed. All 5 users have signed.'}
                             </div>
-                        ` : `
+                        ` : ''}
+                        <div style="padding: 10px; font-size: 0.85em;">
+                            <span class="b">Remark:</span> ${passData.pass_type} basis. Not for sale. Value for insurance only.
+                            ${isReturnFlowActive ? `
+                                <div style="display: flex; margin-top: 8px; border-top: 1px solid #000; padding-top: 8px;">
+                                    <div style="flex: 1;">
+                                        <div class="b" style="text-transform: uppercase;">
+                                            ${passData.movement_type === 'external' ? `RETURN INITIATOR (SG1 ORIGIN): ${sanitizeHTML(passData.from_location_name)} SECURITY` : 'RETURN INITIATOR (RECEIVER):'} 
+                                            ${sanitizeHTML(passData.movement_type === 'external' ? (passData.return_dispatched_by_name || '-') : (passData.receiver_user_name || passData.receiver_name || '-'))}
+                                        </div>
+                                        <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.movement_type === 'external' ? (passData.origin_security_mobile || '-') : (passData.receiver_user_mobile || passData.receiver_mobile || passData.receiver_phone || '-'))}</div>
+                                        ${(passData.movement_type === 'external' ? returnOriginSigBase64 : receiverSigBase64) ? `<img src="data:image/png;base64,${passData.movement_type === 'external' ? returnOriginSigBase64 : receiverSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_initiated_at)}</div>` : '<div style="height: 30px;"></div>'}
+                                    </div>
+                                    <div style="flex: 1; text-align: right;">
+                                        <div class="b" style="text-transform: uppercase;">FINAL RECEIVER: ${sanitizeHTML(passData.return_confirmed_by_name || '-')}</div>
+                                        <div style="font-size: 0.9em; margin-top: 2px;">Phone: ${sanitizeHTML(passData.created_user_mobile) || '-'}</div>
+                                        ${returnConfirmedSigBase64 ? `<img src="data:image/png;base64,${returnConfirmedSigBase64}" class="sign-img" style="height: 25px; margin-top: 5px;" /><br/><div style="font-size: 0.65em;">${formatIST(passData.return_confirmed_at)}</div>` : '<div style="height: 30px;"></div>'}
+                                    </div>
+                                </div>
+                            ` : `
                             <div style="display: flex; margin-top: 8px; border-top: 1px solid #000; padding-top: 8px;">
                                 <div style="flex: 1;">
                                     <div class="b" style="text-transform: uppercase;">REQUESTER: ${sanitizeHTML(passData.created_by_name)}</div>
@@ -488,24 +496,50 @@ const generateChallanPDF = async (passData, isDraft = false) => {
 
                     <div class="signature-area">
                         ${isReturnFlowActive ? `
-                            <div class="sign-box">
-                                <div class="b uppercase" style="font-size: 0.8em;">Manager</div>
-                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_manager_name) || '-'}</div>
-                                ${returnManagerSigBase64 ? `<img src="data:image/png;base64,${returnManagerSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
-                                <div style="font-size: 0.65em;">${formatIST(passData.return_approved_manager_at)}</div>
-                            </div>
-                            <div class="sign-box">
-                                <div class="b uppercase" style="font-size: 0.8em;">SG1 Origin</div>
-                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_dispatched_by_name) || '-'}</div>
-                                ${returnOriginSigBase64 ? `<img src="data:image/png;base64,${returnOriginSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
-                                <div style="font-size: 0.65em;">${formatIST(passData.return_dispatched_at)}</div>
-                            </div>
-                            <div class="sign-box">
-                                <div class="b uppercase" style="font-size: 0.8em;">SG2 Destination</div>
-                                <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_received_by_name) || '-'}</div>
-                                ${returnDestSigBase64 ? `<img src="data:image/png;base64,${returnDestSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
-                                <div style="font-size: 0.65em;">${formatIST(passData.return_received_at)}</div>
-                            </div>
+                            ${passData.movement_type === 'external' && passData.pass_type === 'RGP' ? `
+                                <div class="sign-box">
+                                    <div class="b uppercase" style="font-size: 0.8em;">SG1 (Return Gate)</div>
+                                    <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_dispatched_by_name) || '-'}</div>
+                                    ${returnOriginSigBase64 ? `<img src="data:image/png;base64,${returnOriginSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                    <div style="font-size: 0.65em;">${formatIST(passData.return_dispatched_at || passData.return_initiated_at)}</div>
+                                    ${passData.return_vehicle_number ? `
+                                        <div style="margin-top: 4px; border-top: 0.5px solid #cbd5e1; padding-top: 2px; font-size: 0.7em; font-weight: 700;">
+                                            Ret. Vehicle: ${sanitizeHTML(passData.return_vehicle_number)}
+                                        </div>
+                                    ` : ''}
+                                    ${passData.return_driver_name ? `
+                                        <div style="margin-top: 2px; font-size: 0.7em;">
+                                            Ret. Driver: ${sanitizeHTML(passData.return_driver_name)} ${passData.return_driver_phone ? `(${sanitizeHTML(passData.return_driver_phone)})` : ''}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                                <div class="sign-box">
+                                    <div class="b uppercase" style="font-size: 0.8em;">Final Receiver (Creator)</div>
+                                    <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_confirmed_by_name || passData.created_by_name) || '-'}</div>
+                                    ${returnConfirmedSigBase64 ? `<img src="data:image/png;base64,${returnConfirmedSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                    <div style="font-size: 0.65em;">${formatIST(passData.return_confirmed_at)}</div>
+                                </div>
+                                <div class="sign-box" style="border: none; background: transparent;"></div>
+                            ` : `
+                                <div class="sign-box">
+                                    <div class="b uppercase" style="font-size: 0.8em;">Manager</div>
+                                    <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_manager_name) || '-'}</div>
+                                    ${returnManagerSigBase64 ? `<img src="data:image/png;base64,${returnManagerSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                    <div style="font-size: 0.65em;">${formatIST(passData.return_approved_manager_at)}</div>
+                                </div>
+                                <div class="sign-box">
+                                    <div class="b uppercase" style="font-size: 0.8em;">SG1 Origin</div>
+                                    <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_dispatched_by_name) || '-'}</div>
+                                    ${returnOriginSigBase64 ? `<img src="data:image/png;base64,${returnOriginSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                    <div style="font-size: 0.65em;">${formatIST(passData.return_dispatched_at)}</div>
+                                </div>
+                                <div class="sign-box">
+                                    <div class="b uppercase" style="font-size: 0.8em;">SG2 Destination</div>
+                                    <div style="font-size: 0.7em; margin-bottom: 2px;">${sanitizeHTML(passData.return_received_by_name) || '-'}</div>
+                                    ${returnDestSigBase64 ? `<img src="data:image/png;base64,${returnDestSigBase64}" class="sign-img" />` : '<div style="height: 25px;"></div>'}
+                                    <div style="font-size: 0.65em;">${formatIST(passData.return_received_at)}</div>
+                                </div>
+                            `}
                         ` : `
                             <div class="sign-box">
                                 <div class="b uppercase" style="font-size: 0.8em;">Auth. Signatory</div>

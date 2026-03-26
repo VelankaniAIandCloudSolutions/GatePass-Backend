@@ -39,6 +39,11 @@ router.post('/security/return-dispatch', protect, authorize('security', 'admin')
 router.post('/security/return-receive', protect, authorize('security', 'admin'), materialController.markReturnReceived);
 // External NRGP: SG1 assigns driver and completes pass
 router.post('/security/external-nrgp-complete', protect, authorize('security', 'admin'), materialController.markExternalNRGPComplete);
+// External RGP Return Flow
+router.post('/security/external-rgp-return-start', protect, authorize('security', 'admin'), materialController.markExternalRGPReturnStart);
+router.post('/security/external-rgp-return-confirm', protect, authorize('security', 'admin'), materialController.markExternalRGPReturnConfirmed);
+router.get('/confirm-external-rgp-return', materialController.confirmExternalRGPReturnByCreator);
+router.post('/confirm-external-rgp-return', protect, materialController.confirmExternalRGPReturnByCreator);
 
 
 router.get('/track', protect, materialController.getPassTracking);

@@ -593,6 +593,151 @@ const sendRejectionEmail = async (email, data) => {
 };
 
 
+const sendExternalRGPDispatchedEmail = async (email, data) => {
+    const { recipientName, dcNumber, driverName, driverPhone, vehicleNumber, origin, externalAddress, dispatchedAt, loginUrl } = data;
+
+    const formattedDate = (() => {
+        try {
+            const d = new Date(dispatchedAt);
+            return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }).replace(/\//g, '-').replace(',', '') + ' (IST)';
+        } catch { return dispatchedAt || 'N/A'; }
+    })();
+
+    const html = `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; background: #7c3aed; color: white; padding: 8px 16px; border-radius: 8px; font-weight: bold;">GatePass RGP ↩</div>
+            </div>
+            <h2 style="color: #1e293b; text-align: center; margin-bottom: 20px;">External RGP – Material Dispatched</h2>
+            <p style="color: #475569;">Hello <strong>${recipientName}</strong>,</p>
+            <p style="color: #475569;">Gate Pass <strong>${dcNumber}</strong> (External RGP) has been dispatched by Origin Security. The material is now with the driver and will return to your facility.</p>
+
+            <div style="background: #f5f3ff; padding: 25px; border-radius: 12px; margin: 25px 0; border: 1px solid #ede9fe;">
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Pass Type:</strong> External RGP (Returnable – material will return)</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Origin:</strong> ${origin || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>External Destination:</strong> ${externalAddress || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Dispatched At:</strong> ${formattedDate}</p>
+            </div>
+
+            <div style="background: #f8fafc; padding: 20px 25px; border-radius: 12px; margin: 20px 0; border: 1px solid #e2e8f0;">
+                <p style="margin: 0 0 10px 0; font-weight: 700; color: #374151; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;">Driver Details</p>
+                <p style="margin: 5px 0; font-size: 15px; color: #1e293b;"><strong>Driver Name:</strong> ${driverName}</p>
+                <p style="margin: 5px 0; font-size: 15px; color: #1e293b;"><strong>Driver Phone:</strong> ${driverPhone}</p>
+                <p style="margin: 5px 0; font-size: 15px; color: #1e293b;"><strong>Vehicle Number:</strong> ${vehicleNumber || 'N/A'}</p>
+            </div>
+
+            <div style="text-align: center; margin-top: 30px;">
+                <a href="${loginUrl}" style="background-color: #4f46e5; color: white; padding: 14px 35px; border-radius: 10px; text-decoration: none; font-weight: bold; display: inline-block;">View in Portal</a>
+            </div>
+            <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                This is an automated notification from the GatePass System.
+            </p>
+        </div>
+    `;
+    return await sendMailInternal({ to: email, subject: `Dispatched: External RGP Material Sent – ${dcNumber} [RGP]`, html });
+};
+
+// Email to SG1 after dispatch: a "Start Return" action button
+const sendExternalRGPSG1ReturnEmail = async (email, data) => {
+    const { securityName, dcNumber, driverName, vehicleNumber, origin, externalAddress, returnStartUrl, loginUrl } = data;
+
+    const html = `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; background: #7c3aed; color: white; padding: 8px 16px; border-radius: 8px; font-weight: bold;">GatePass Return</div>
+            </div>
+            <h2 style="color: #1e293b; text-align: center; margin-bottom: 20px;">External RGP – Material Dispatched</h2>
+            <p style="color: #475569;">Hello <strong>${securityName}</strong>,</p>
+            <p style="color: #475569;">Gate Pass <strong>${dcNumber}</strong> (External RGP) has been dispatched. When the material returns to your gate, please click <strong>Start Return</strong> to initiate the return journey.</p>
+
+            <div style="background: #f5f3ff; padding: 20px 25px; border-radius: 12px; margin: 20px 0; border: 1px solid #ede9fe;">
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Origin:</strong> ${origin || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>External Destination:</strong> ${externalAddress || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Driver:</strong> ${driverName} | Vehicle: ${vehicleNumber || 'N/A'}</p>
+            </div>
+
+            <div style="background: #f5f3ff; border: 1px dashed #7c3aed; padding: 20px; border-radius: 12px; margin-bottom: 25px; text-align: center;">
+                <p style="margin: 0 0 15px 0; font-weight: 600; color: #5b21b6; font-size: 14px; text-transform: uppercase;">Action Required (When Material Returns)</p>
+                <a href="${returnStartUrl}" style="background-color: #7c3aed; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">🚛 Start Return</a>
+                <a href="${loginUrl}" style="background-color: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">🔐 Login to Portal</a>
+            </div>
+            <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                This is an automated notification from GatePass Security.
+            </p>
+        </div>
+    `;
+    return await sendMailInternal({ to: email, subject: `Action Required: External RGP Return – Start When Ready – ${dcNumber}`, html });
+};
+
+// Email to SG1 after return started: confirm return at gate
+const sendExternalRGPSG1ConfirmReturnEmail = async (email, data) => {
+    const { securityName, dcNumber, returnVehicleNumber, returnDriverName, returnDriverPhone, origin, externalAddress, confirmUrl, rejectUrl, loginUrl } = data;
+
+    const html = `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; background: #6366f1; color: white; padding: 8px 16px; border-radius: 8px; font-weight: bold;">GatePass Return</div>
+            </div>
+            <h2 style="color: #1e293b; text-align: center; margin-bottom: 20px;">External RGP – Confirm Return at Gate</h2>
+            <p style="color: #475569;">Hello <strong>${securityName}</strong>,</p>
+            <p style="color: #475569;">The return vehicle for Gate Pass <strong>${dcNumber}</strong> has been registered. Please verify the material and confirm the return.</p>
+
+            <div style="background: #eef2ff; padding: 20px 25px; border-radius: 12px; margin: 20px 0; border: 1px solid #e0e7ff;">
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Pass Type:</strong> External RGP (Returnable)</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Return Route:</strong> ${externalAddress || 'External'} → ${origin || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Return Vehicle:</strong> <span style="font-weight: 700; color: #1e293b; background: #fef08a; padding: 2px 6px; border-radius: 4px; border: 1px solid #facc15;">${returnVehicleNumber || 'N/A'}</span></p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Return Driver:</strong> ${returnDriverName || 'N/A'} (${returnDriverPhone || 'N/A'})</p>
+            </div>
+
+            <div style="background: #f8fafc; border: 1px dashed #6366f1; padding: 20px; border-radius: 12px; margin-bottom: 25px; text-align: center;">
+                <p style="margin: 0 0 15px 0; font-weight: 600; color: #4338ca; font-size: 14px; text-transform: uppercase;">Confirm Return</p>
+                <a href="${confirmUrl}" style="background-color: #6366f1; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">✅ Confirm Return</a>
+                <a href="${rejectUrl}" style="background-color: #ef4444; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">❌ Reject</a>
+                <a href="${loginUrl}" style="background-color: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">📋 Portal</a>
+            </div>
+            <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                This is an automated notification from GatePass Security.
+            </p>
+        </div>
+    `;
+    return await sendMailInternal({ to: email, subject: `Action Required: Confirm External RGP Return – ${dcNumber}`, html });
+};
+
+// Email to Creator: confirm final receipt of returned material
+const sendExternalRGPCreatorReturnConfirmEmail = async (email, data) => {
+    const { recipientName, dcNumber, returnVehicleNumber, returnDriverName, returnDriverPhone, origin, externalAddress, confirmUrl, rejectUrl, loginUrl } = data;
+
+    const html = `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; padding: 40px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; background: #10b981; color: white; padding: 8px 16px; border-radius: 8px; font-weight: bold;">GatePass ✅</div>
+            </div>
+            <h2 style="color: #1e293b; text-align: center; margin-bottom: 20px;">External RGP – Confirm Return Receipt</h2>
+            <p style="color: #475569;">Hello <strong>${recipientName}</strong>,</p>
+            <p style="color: #475569;">Origin Security has confirmed that the materials for Gate Pass <strong>${dcNumber}</strong> have returned. Please confirm that you have received them back.</p>
+
+            <div style="background: #f0fdf4; padding: 20px 25px; border-radius: 12px; margin: 20px 0; border: 1px solid #dcfce7;">
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Pass Type:</strong> External RGP (Returnable)</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Route:</strong> ${externalAddress || 'External'} → ${origin || 'N/A'}</p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Return Vehicle:</strong> <span style="font-weight: 700; color: #1e293b; background: #fef08a; padding: 2px 6px; border-radius: 4px; border: 1px solid #facc15;">${returnVehicleNumber || 'N/A'}</span></p>
+                <p style="margin: 5px 0; font-size: 14px; color: #475569;"><strong>Return Driver:</strong> ${returnDriverName || 'N/A'} (${returnDriverPhone || 'N/A'})</p>
+            </div>
+
+            <div style="background: #f8fafc; border: 1px dashed #10b981; padding: 20px; border-radius: 12px; margin-bottom: 25px; text-align: center;">
+                <p style="margin: 0 0 15px 0; font-weight: 600; color: #166534; font-size: 14px; text-transform: uppercase;">Final Confirmation</p>
+                <a href="${confirmUrl}" style="background-color: #10b981; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">✅ Confirm I Received the Return</a>
+                <a href="${rejectUrl}" style="background-color: #ef4444; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">❌ Reject Return Receipt</a>
+                <a href="${loginUrl}" style="background-color: #3b82f6; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin: 5px;">🔐 Login to Portal</a>
+            </div>
+            <p style="font-size: 12px; color: #94a3b8; text-align: center; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+                This is an automated notification from the GatePass System.
+            </p>
+        </div>
+    `;
+    return await sendMailInternal({ to: email, subject: `Action Required: Confirm External RGP Return Receipt – ${dcNumber}`, html });
+};
+
+
 const sendExternalNRGPCompletionEmail = async (email, data) => {
     const {
         recipientName, dcNumber, driverName, driverPhone, vehicleNumber,
@@ -662,6 +807,10 @@ module.exports = {
     sendReturnOriginSecurityEmail,
     sendReturnCompletionEmail,
     sendRejectionEmail,
-    sendExternalNRGPCompletionEmail
+    sendExternalNRGPCompletionEmail,
+    // External RGP emails
+    sendExternalRGPDispatchedEmail,
+    sendExternalRGPSG1ReturnEmail,
+    sendExternalRGPSG1ConfirmReturnEmail,
+    sendExternalRGPCreatorReturnConfirmEmail
 };
-
